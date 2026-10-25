@@ -1329,8 +1329,13 @@ await check('no leaked credential, no personal absolute path, and the author nam
   const noticeText = readFileSync(join(PACKAGE_ROOT, 'THIRD-PARTY.md'), 'utf8')
   assert.ok(LICENCE_TEXT.includes(UPSTREAM_AUTHOR) || noticeText.includes(UPSTREAM_AUTHOR),
     'the upstream MIT notice is kept: attribution is a licence condition, not a credit')
-  assert.ok(LICENCE_TEXT.includes('THIRD-PARTY.md'),
-    'and LICENSE points at where that notice lives')
+  // LICENSE must stay byte-standard so GitHub recognises it; the pointer to the
+  // notice therefore lives in the READMEs and package.json's files list.
+  for (const file of ['README.md', 'README.en.md']) {
+    assert.ok(readFileSync(join(PACKAGE_ROOT, file), 'utf8').includes('THIRD-PARTY.md'),
+      `${file} points at the third-party notice`)
+  }
+  assert.ok(manifest.files.includes('THIRD-PARTY.md'), 'and the notice ships with the package')
 })
 
 await check('both READMEs exist, in both languages, with the same structure and the required chapters', () => {
