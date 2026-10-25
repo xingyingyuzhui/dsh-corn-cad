@@ -45,7 +45,7 @@ window.__ModuleLoader__.load({
         picked: '已选中 {count} 个图元，已记录',
         selected: '已选中 {count} 个',
         clearSel: '清除',
-        hint: '点击图元选中（Shift 多选）',
+        hint: '左键拖动平移 · 右键框选发消息',
         bubbleTitle: '这块怎么改？',
         bubblePlaceholder: '例如：这几根线改成黑色 / 整体上移 5mm',
         bubbleSend: '发送',
@@ -68,7 +68,7 @@ window.__ModuleLoader__.load({
         picked: '{count} entities selected, recorded',
         selected: '{count} selected',
         clearSel: 'Clear',
-        hint: 'Click an entity to select (Shift to add)',
+        hint: 'Drag to pan · right-drag to circle and send',
         bubbleTitle: 'How should this change?',
         bubblePlaceholder: 'e.g. make these lines black / move up 5mm',
         bubbleSend: 'Send',
@@ -82,7 +82,7 @@ window.__ModuleLoader__.load({
     }
 
     var CSS = [
-      '.corncad-root{display:flex;flex-direction:column;width:100%;height:100%;min-height:0;background:var(--corncad-bg,#fff)}',
+      '.corncad-root{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0;background:var(--corncad-bg,#fff)}',
       '.corncad-bar{display:flex;align-items:center;gap:6px;padding:6px 8px;border-bottom:1px solid rgba(127,127,127,.25);flex:none;font-size:12px}',
       '.corncad-btn{min-width:26px;height:22px;padding:0 8px;border:1px solid rgba(127,127,127,.35);border-radius:5px;background:transparent;color:inherit;font-size:12px;line-height:1;cursor:pointer}',
       '.corncad-btn:hover{background:rgba(127,127,127,.12)}',
@@ -92,13 +92,14 @@ window.__ModuleLoader__.load({
       '.corncad-scroll.corncad-dragging{cursor:grabbing}',
       '.corncad-scroll.corncad-dragging .corncad-img{pointer-events:none}',
       '.corncad-img{display:block;margin:0 auto;background:var(--corncad-bg,#fff);user-select:none;-webkit-user-drag:none}',
-      '.corncad-canvas{position:relative;margin:0 auto;background:var(--corncad-bg,#fff);user-select:none}',
+      '.corncad-canvas{position:relative;margin:0 auto;background:var(--corncad-bg,#fff);user-select:none;cursor:grab}',
       // An inline <svg width="100%" height="100%"> has no intrinsic height, so the
       // canvas gets its height from CSS aspect-ratio (set inline from the viewBox)
       // and the SVG is pinned to fill it exactly. Flowing the SVG instead would
       // collapse the box and leave the panel blank.
       '.corncad-canvas>svg{display:block;position:absolute;inset:0;width:100%;height:100%}',
       '.corncad-canvas-selecting{cursor:crosshair}',
+      '.corncad-dragging .corncad-canvas{cursor:grabbing}',
       '.corncad-hit{pointer-events:visiblePainted;cursor:pointer}',
       '.corncad-hit:hover{stroke:#3b82f6 !important;stroke-width:2 !important}',
       '.corncad-sel{stroke:#f97316 !important;stroke-width:2.5 !important}',
@@ -107,8 +108,12 @@ window.__ModuleLoader__.load({
       '.corncad-selinfo b{font-weight:600}',
       '.corncad-selcount{opacity:.75}',
       '.corncad-selclear{margin-left:auto;min-width:20px;height:18px;padding:0 6px;border:1px solid rgba(127,127,127,.35);border-radius:4px;background:transparent;color:inherit;font-size:11px;cursor:pointer}',
-      '.corncad-band{position:fixed;pointer-events:none;border:1px dashed #f97316;background:rgba(249,115,22,.12);z-index:2147483000}',
-      '.corncad-bubble{position:fixed;width:300px;z-index:2147483001;border-radius:10px;background:#fff;color:#1a1d21;border:1px solid rgba(0,0,0,.14);box-shadow:0 8px 28px rgba(0,0,0,.22);padding:10px;display:flex;flex-direction:column;gap:8px;font-size:12px}',
+      // The overlay layer is absolutely positioned inside the panel, so the band
+      // and the bubble are clamped to the panel's own box rather than the window's.
+      // A sidebar is far narrower than the window, and `position: fixed` coordinates
+      // measured against window.innerWidth put the bubble outside the visible area.
+      '.corncad-band{position:absolute;pointer-events:none;border:1px dashed #f97316;background:rgba(249,115,22,.12);z-index:20}',
+      '.corncad-bubble{position:absolute;width:300px;max-width:calc(100% - 16px);z-index:21;border-radius:10px;background:#fff;color:#1a1d21;border:1px solid rgba(0,0,0,.14);box-shadow:0 8px 28px rgba(0,0,0,.22);padding:10px;display:flex;flex-direction:column;gap:8px;font-size:12px}',
       '.corncad-bubble-h{font-weight:600;font-size:12px;display:flex;align-items:center;gap:6px}',
       '.corncad-bubble-h span{font-weight:400;opacity:.6;font-size:11px}',
       '.corncad-bubble textarea{width:100%;box-sizing:border-box;min-height:58px;resize:vertical;border:1px solid rgba(127,127,127,.35);border-radius:6px;padding:6px 8px;font:inherit;font-size:12px;outline:none}',
@@ -286,6 +291,8 @@ window.__ModuleLoader__.load({
       // ── selection ────────────────────────────────────────────────────────────
       // pickRef: id -> { type, layer, handle, bbox } for every entity the host
       // reported; selectionRef mirrors the current selection for the POST.
+      // The panel element the overlays are positioned against.
+      var rootRef = useRef(null)
       var canvasRef = useRef(null)
       var pickRef = useRef(null)
       var selectionRef = useRef([])
@@ -555,12 +562,54 @@ window.__ModuleLoader__.load({
        * out with position:fixed and stay put while the drawing scrolls; it is
        * clamped so it never runs off the right or bottom edge.
        */
+      /**
+       * The panel box the overlays are positioned against.
+       *
+       * The band and the bubble are absolutely positioned inside .corncad-root, so
+       * every coordinate has to be in that element's own space. Measuring the
+       * window instead was the bug: a document-preview sidebar is a few hundred
+       * pixels wide while the window is well over a thousand, so a bubble clamped
+       * to window.innerWidth landed outside the panel and was clipped by it.
+       *
+       * @returns {{left:number,top:number,width:number,height:number}}
+       */
+      var panelRect = function () {
+        var node = rootRef.current
+        if (node !== null && typeof node.getBoundingClientRect === 'function') {
+          var rect = node.getBoundingClientRect()
+          if (rect.width > 0 && rect.height > 0) {
+            return { left: rect.left, top: rect.top, width: rect.width, height: rect.height }
+          }
+        }
+        return { left: 0, top: 0, width: typeof window === 'undefined' ? 0 : window.innerWidth, height: typeof window === 'undefined' ? 0 : window.innerHeight }
+      }
+
+      /** Viewport point -> point inside the panel. */
+      var toPanelPoint = function (clientX, clientY) {
+        var box = panelRect()
+        return { x: clientX - box.left, y: clientY - box.top }
+      }
+
+      /**
+       * Open the instruction bubble at a screen point.
+       *
+       * The anchor is converted into panel space and clamped to the panel, so the
+       * bubble stays fully visible: beside the pointer when there is room, flipped
+       * to the other side when there is not, and never past an edge.
+       */
       var openBubble = function (clientX, clientY) {
-        var W = typeof window === 'undefined' ? 1200 : window.innerWidth
-        var H = typeof window === 'undefined' ? 800 : window.innerHeight
-        var BW = 300, BH = 168
-        var left = Math.min(Math.max(8, clientX + 12), W - BW - 8)
-        var top = Math.min(Math.max(8, clientY + 12), H - BH - 8)
+        var box = panelRect()
+        var BW = Math.min(300, Math.max(180, box.width - 16))
+        // Height is reserved for the textarea plus the button row and hint.
+        var BH = 172
+        var point = toPanelPoint(clientX, clientY)
+        // Prefer below-right of the pointer; flip when that would overflow.
+        var left = point.x + 12
+        if (left + BW > box.width - 8) left = point.x - BW - 12
+        left = Math.min(Math.max(8, left), Math.max(8, box.width - BW - 8))
+        var top = point.y + 12
+        if (top + BH > box.height - 8) top = point.y - BH - 12
+        top = Math.min(Math.max(8, top), Math.max(8, box.height - BH - 8))
         setBubble({ left: left, top: top })
         setBubbleText('')
       }
@@ -734,29 +783,84 @@ window.__ModuleLoader__.load({
         return null
       }
 
+      /**
+       * A left-button press on the drawing pans it, exactly like a CAD viewer, so
+       * the drawing is never stuck. Selecting is the right button's job, or Shift
+       * + left when the user wants to add without opening the bubble.
+       */
       var onCanvasPointerDown = function (event) {
-        // Left button: rubber-band select. Right button: same, but it also opens
-        // the instruction bubble on release.
-        if (event.button !== 0 && event.button !== 2) return
-        if (event.button === 2) event.preventDefault()
-        selectBoxRef.current = {
-          x: event.clientX, y: event.clientY, moved: false,
-          additive: event.shiftKey === true, bubble: event.button === 2,
+        if (event.button === 2) {
+          // Right button: rubber-band select, and open the bubble on release.
+          event.preventDefault()
+          selectBoxRef.current = {
+            x: event.clientX, y: event.clientY, moved: false,
+            additive: event.shiftKey === true, bubble: true,
+          }
+          return
         }
+        if (event.button !== 0) return
+        if (event.shiftKey === true) {
+          // Shift + left: select (additive) without the bubble.
+          selectBoxRef.current = {
+            x: event.clientX, y: event.clientY, moved: false,
+            additive: true, bubble: false,
+          }
+          return
+        }
+        // Plain left button: pan.
+        var node = scrollRef.current
+        if (node === null) return
+        dragRef.current = {
+          id: event.pointerId, x: event.clientX, y: event.clientY,
+          left: node.scrollLeft, top: node.scrollTop, moved: false,
+        }
+        try { event.currentTarget.setPointerCapture(event.pointerId) } catch (error) { /* best effort */ }
+        setDragging(true)
       }
       var onCanvasPointerMove = function (event) {
+        // A left-button drag that started on the drawing pans it.
+        var drag = dragRef.current
+        if (drag !== null && drag.id === event.pointerId) {
+          if (Math.abs(event.clientX - drag.x) > 2 || Math.abs(event.clientY - drag.y) > 2) drag.moved = true
+          var node = scrollRef.current
+          if (node !== null) {
+            node.scrollLeft = drag.left - (event.clientX - drag.x)
+            node.scrollTop = drag.top - (event.clientY - drag.y)
+          }
+          return
+        }
         var box = selectBoxRef.current
         if (box === null) return
         var dx = event.clientX - box.x, dy = event.clientY - box.y
         if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
           box.moved = true
           setSelecting(true)
-          // Live rubber band, drawn in screen space above the drawing.
-          setBand({ x: Math.min(box.x, event.clientX), y: Math.min(box.y, event.clientY),
+          // Live rubber band, in panel space like the bubble (see openBubble).
+          var from = toPanelPoint(box.x, box.y)
+          var to = toPanelPoint(event.clientX, event.clientY)
+          setBand({ x: Math.min(from.x, to.x), y: Math.min(from.y, to.y),
                     width: Math.abs(dx), height: Math.abs(dy) })
         }
       }
       var onCanvasPointerUp = function (event) {
+        // Finish a pan that the canvas itself started.
+        var drag = dragRef.current
+        if (drag !== null && drag.id === event.pointerId) {
+          dragRef.current = null
+          setDragging(false)
+          try { event.currentTarget.releasePointerCapture(event.pointerId) } catch (error) { /* already released */ }
+          // A left press that never moved is a click: select the entity under it,
+          // additive with Shift, and no bubble.
+          if (drag.moved !== true) {
+            var hit = entityIdAt(event.clientX, event.clientY)
+            if (hit !== '') {
+              var picked = event.shiftKey === true ? selectionRef.current.map(function (p) { return p.id }) : []
+              if (picked.indexOf(hit) < 0) picked.push(hit)
+              commitSelection(picked)
+            }
+          }
+          return
+        }
         var box = selectBoxRef.current
         selectBoxRef.current = null
         setSelecting(false)
@@ -889,7 +993,7 @@ window.__ModuleLoader__.load({
           }, t('clearSel')))
       }
 
-      return h('div', { className: 'corncad-root' },
+      return h('div', { className: 'corncad-root', ref: rootRef },
         bar,
         h('div', {
           className: dragging === true ? 'corncad-scroll corncad-dragging' : 'corncad-scroll',

@@ -687,15 +687,21 @@ async function mountBody(respond, options = {}) {
 
   /**
    * Hand each ref the node a real commit would: the canvas gets the inlined-SVG
-   * host, every other ref gets the scrollport.
+   * host, the panel root gets its own box, every other ref gets the scrollport.
    */
   let canvas = null
+  let panelBox = { left: 0, top: 0, width: 800, height: 600 }
+  const panelNode = {
+    getBoundingClientRect: () => ({ ...panelBox }),
+  }
   const commitRefs = (tree) => {
     walk(tree, (element) => {
       const ref = element.props?.ref
       if (ref === undefined || ref === null) return
-      const isCanvas = String(element.props?.className ?? '').includes('corncad-canvas')
-      const node = isCanvas && canvas !== null ? canvas.node : viewport
+      const className = String(element.props?.className ?? '')
+      let node = viewport
+      if (className.includes('corncad-canvas') && canvas !== null) node = canvas.node
+      else if (className.includes('corncad-root')) node = panelNode
       if (typeof ref === 'function') ref(node)
       else if (typeof ref === 'object') ref.current = node
     })
@@ -734,6 +740,8 @@ async function mountBody(respond, options = {}) {
     paint, render,
     /** Build the canvas double from an SVG the host produced. */
     useCanvas(svgText) { canvas = fakeCanvas(svgText); return canvas },
+    /** Set the panel's own rect, which overlays are clamped against. */
+    panel(box) { panelBox = box; return panelNode },
     unmount() { globalThis.fetch = realFetch },
   }
 }
@@ -857,6 +865,68 @@ await check('a right-drag across a region selects only what it covers, and opens
     assert.equal(body.drawingPath === undefined || typeof body.path === 'string', true)
     assert.deepEqual(body.picks.map((p) => p.id).sort(), ['e1', 'e2'],
       'only the covered entities are taken: the full-sheet frame is left out')
+  } finally {
+    mounted.unmount()
+  }
+})
+
+await check('a plain left drag pans the drawing instead of starting a selection', async () => {
+  const mounted = await mountBody(async () => ({ ok: true, status: 200, json: async () => readyWithPicks() }))
+  try {
+    const props = bodyProps(sampleBytes, mounted.scrollport)
+    mounted.useCanvas(FLAT_SVG)
+    const tree = await mounted.render(props)
+    const canvas = canvasSurface(tree)
+
+    const left = 40, top = 25
+    canvas.props.onPointerDown({
+      button: 0, clientX: 120, clientY: 90, pointerId: 1, shiftKey: false,
+      currentTarget: { setPointerCapture() {}, releasePointerCapture() {} },
+      preventDefault() {},
+    })
+    canvas.props.onPointerMove({ clientX: 100, clientY: 70, pointerId: 1 })
+    assert.equal(mounted.viewport.scrollLeft, left + 20, 'dragging left scrolls the drawing right')
+    assert.equal(mounted.viewport.scrollTop, top + 20, 'and vertically at the same time')
+    canvas.props.onPointerUp({ clientX: 100, clientY: 70, pointerId: 1, currentTarget: { releasePointerCapture() {} } })
+
+    // A pan must not circle anything: the left button belongs to navigation.
+    assert.equal(mounted.calls.filter((call) => call.url === SELECTION_ROUTE).length, 0,
+      'panning records no selection')
+    assert.equal(elementsWithClass(await mounted.render(props), 'corncad-bubble').length, 0,
+      'and opens no bubble')
+  } finally {
+    mounted.unmount()
+  }
+})
+
+await check('the bubble is clamped inside the panel, not the window', async () => {
+  const mounted = await mountBody(async () => ({ ok: true, status: 200, json: async () => readyWithPicks() }))
+  try {
+    const props = bodyProps(sampleBytes, mounted.scrollport)
+    mounted.useCanvas(FLAT_SVG)
+    // Pretend the sidebar panel is 360px wide inside a much wider window, and that
+    // the pointer is released near its right edge. A window-clamped bubble would
+    // land outside the panel and be clipped by it.
+    // A 360px panel: the band still reaches the entities (the canvas CTM is the
+    // identity in this harness), and the pointer is released at its right edge.
+    mounted.panel({ left: 0, top: 0, width: 360, height: 620 })
+    let tree = await mounted.render(props)
+    const canvas = canvasSurface(tree)
+
+    canvas.props.onPointerDown({ button: 2, clientX: 10, clientY: 10, shiftKey: false, preventDefault() {} })
+    canvas.props.onPointerMove({ clientX: 340, clientY: 50 })
+    canvas.props.onPointerUp({ button: 2, clientX: 340, clientY: 50, shiftKey: false, preventDefault() {} })
+    tree = await mounted.render(props)
+
+    const bubble = elementsWithClass(tree, 'corncad-bubble')[0]
+    assert.ok(bubble, 'the bubble opens')
+    const left = Number.parseFloat(bubble.props.style.left)
+    const top = Number.parseFloat(bubble.props.style.top)
+    const width = 300
+    assert.ok(left >= 0, `bubble left ${left} is inside the panel`)
+    assert.ok(left + width <= 360, `bubble right edge ${left + width} stays within 360`)
+    assert.ok(top >= 0, `bubble top ${top} is inside the panel`)
+    assert.ok(top + 172 <= 620, `bubble bottom ${top + 172} stays within 620`)
   } finally {
     mounted.unmount()
   }

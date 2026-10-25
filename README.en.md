@@ -41,10 +41,15 @@ vector drawing.
 
 | Action | Behaviour |
 |---|---|
+| **Left-drag** | Pan the drawing |
 | Click | Select the entity under the cursor |
 | Shift + click | Add to the selection |
 | **Right-drag** | Circle a region and open the instruction bubble |
-| Left-drag | Circle a region, no bubble |
+| Shift + left-drag | Circle a region, no bubble |
+
+The left button is always navigation: press and drag to pan, press without moving
+to select. Circling belongs to the right button, so the two never fight over the
+same gesture and the drawing is never stuck.
 
 Selection is decided by **real geometric coverage**, not bounding-box intersection. The sheet border is
 a single 420×297 polyline and table rules span the whole sheet, so a bbox test drags the entire frame
@@ -186,8 +191,8 @@ all decode correctly.
 
 ## Self-check
 
-The self-check needs no network, no Harness, no React and no installed dependencies. plain Node runs all 32 checks;
-a clean run prints `32/32 checks passed` and exits 0, any failure exits non-zero, so it drops straight
+The self-check needs no network, no Harness, no React and no installed dependencies. plain Node runs all 34 checks;
+a clean run prints `34/34 checks passed` and exits 0, any failure exits non-zero, so it drops straight
 into CI.
 
 ```bash
