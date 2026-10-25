@@ -13,10 +13,12 @@
  *
  * @module dsh-corn-cad
  */
+import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import { dxfToSvg } from './lib/dxf2svg.mjs'
@@ -25,7 +27,9 @@ import { dxfToSvg } from './lib/dxf2svg.mjs'
 export const name = 'dsh-corn-cad'
 
 /** The connection service owns the /api channel these routes register on. */
-export const inject = ['connection']
+// `tools` is optional (a headless preset may not expose it); the preview routes
+// must mount regardless, so only the agent-facing tool entry depends on it.
+export const inject = { required: ['connection'], optional: ['tools'] }
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
@@ -119,14 +123,122 @@ function decodeDxf(bytes) {
   const head = buf.subarray(0, Math.min(buf.length, 16 * 1024)).toString('latin1')
   const cp = /\$DWGCODEPAGE\s*\r?\n\s*3\s*\r?\n\s*([A-Za-z0-9_]+)/.exec(head)
   const ver = /\$ACADVER\s*\r?\n\s*1\s*\r?\n\s*AC(\d+)/.exec(head)
-  const label = codepageEncoding(cp?.[1] ?? '', ver === null ? NaN : Number(ver[1]))
-  if (label === null) return buf.toString('utf8')
-  try {
-    return new TextDecoder(label).decode(buf)
-  } catch {
-    // Unknown/unsupported label on an old Node build — fall back rather than fail.
-    return buf.toString('utf8')
+  const declared = codepageEncoding(cp?.[1] ?? '', ver === null ? NaN : Number(ver[1]))
+
+  // The declaration is not always true — ezdxf writes GBK bytes while declaring
+  // ANSI_1252 on an R2007+ document, and a wrong guess shows as mojibake in every
+  // label. So decode with the declared label first, score the result, and keep a
+  // better-scoring candidate. Fewer U+FFFD means a more plausible reading.
+  const candidates = []
+  if (declared !== null) candidates.push(declared)
+  if (declared !== 'utf-8') candidates.push('utf-8')
+  for (const extra of ['gbk', 'big5', 'shift_jis']) {
+    if (!candidates.includes(extra)) candidates.push(extra)
   }
+
+  let best = { text: null, bad: Infinity, label: null }
+  for (const label of candidates) {
+    let text
+    try {
+      text = new TextDecoder(label).decode(buf)
+    } catch {
+      continue
+    }
+    const bad = (text.match(/\uFFFD/g) ?? []).length
+    if (bad < best.bad) best = { text, bad, label }
+    if (bad === 0) break
+  }
+  if (best.text !== null) return best.text
+  return buf.toString('utf8')
+}
+
+/**
+ * Locate a Python interpreter that can `import ezdxf`.
+ *
+ * The DWG/DXF decoder vendored for previews is JavaScript, but editing needs a
+ * real DXF library, and ezdxf is Python. Which interpreter has it installed is a
+ * property of the machine, not of this package: the DSH bundled runtime is the
+ * preferred home (it survives app updates), then PATH, then a virtualenv the user
+ * points at. The first candidate that imports ezdxf wins, and the answer is
+ * cached because probing costs a process spawn.
+ */
+const PYTHON_CANDIDATES = (() => {
+  const list = []
+  const fromEnv = process.env.CORNCAD_PYTHON
+  if (typeof fromEnv === 'string' && fromEnv !== '') list.push(fromEnv)
+  // The DSH runtime ships a Python; the app installer keeps it under Resources.
+  const app = process.env.DSH_APP_PATH ?? ''
+  if (app !== '') list.push(path.join(app, 'Contents/Resources/runtime/primary-runtime/dependencies/python/bin/python3.12'))
+  list.push('/Applications/DeepSeek Harness.app/Contents/Resources/runtime/primary-runtime/dependencies/python/bin/python3.12')
+  list.push('python3', 'python')
+  return list
+})()
+
+let pythonPromise
+/**
+ * The first interpreter that can import ezdxf, or null.
+ * @returns {Promise<string|null>}
+ */
+function pythonWithEzdxf() {
+  if (pythonPromise !== undefined) return pythonPromise
+  pythonPromise = (async () => {
+    for (const candidate of PYTHON_CANDIDATES) {
+      const ok = await new Promise((resolve) => {
+        try {
+          const child = spawn(candidate, ['-c', 'import ezdxf'], { stdio: 'ignore' })
+          child.on('error', () => resolve(false))
+          child.on('exit', (code) => resolve(code === 0))
+        } catch {
+          resolve(false)
+        }
+      })
+      if (ok) return candidate
+    }
+    return null
+  })()
+  return pythonPromise
+}
+
+/**
+ * Run the edit helper and return its JSON answer.
+ * @param {string} script absolute path of lib/dxf_edit.py.
+ * @param {string[]} args arguments after the interpreter.
+ * @returns {Promise<{ok:boolean, code?:string, message?:string, [key:string]:any}>}
+ */
+async function runEditScript(script, args) {
+  const python = await pythonWithEzdxf()
+  if (python === null) {
+    return {
+      ok: false,
+      code: 'NO_EZDXF',
+      message: '未找到装有 ezdxf 的 Python。安装方式：<python> -m pip install ezdxf，' +
+        '或用 CORNCAD_PYTHON 环境变量指定解释器路径。',
+    }
+  }
+  return await new Promise((resolve) => {
+    const child = spawn(python, [script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (chunk) => { out += String(chunk) })
+    child.stderr.on('data', (chunk) => { err += String(chunk) })
+    child.on('error', (error) => resolve({ ok: false, code: 'SPAWN_FAILED', message: String(error && error.message || error) }))
+    child.on('exit', (code) => {
+      const text = out.trim()
+      if (text !== '') {
+        try {
+          resolve(JSON.parse(text))
+          return
+        } catch {
+          // fall through to the raw report
+        }
+      }
+      resolve({
+        ok: false,
+        code: 'EDITOR_FAILED',
+        message: (err.trim() || text || `editor exited with ${code}`),
+      })
+    })
+  })
 }
 
 /**
@@ -319,6 +431,95 @@ async function handleSelectionRead(request) {
   }
 }
 
+/** Drawings larger than this are refused for editing, matching the preview cap. */
+const MAX_EDIT_BYTES = 64 * 1024 * 1024
+
+/**
+ * Refuse edits outside the directory the preview is allowed to touch.
+ *
+ * This route writes files, so the target has to be a real `.dxf` on disk inside a
+ * directory the caller named — not a path traversal, not a symlink out, not a DWG
+ * (which needs a decoder with a writer this plugin does not ship). The workspace
+ * root comes from the request when present so a profile with several workspaces
+ * still works.
+ *
+ * @param {string} file absolute or workspace-relative drawing path.
+ * @param {string} [workspace] workspace root, when the caller knows it.
+ * @returns {{ok:true, path:string}|{ok:false, code:string, message:string}}
+ */
+function resolveEditable(file, workspace) {
+  if (typeof file !== 'string' || file.trim() === '') {
+    return { ok: false, code: 'NO_PATH', message: '缺少图纸路径' }
+  }
+  const target = path.resolve(workspace && workspace !== '' ? workspace : process.cwd(), file)
+  if (path.extname(target).toLowerCase() !== '.dxf') {
+    return { ok: false, code: 'NOT_DXF', message: '只能编辑 .dxf；.dwg 需要另存为 DXF 后再改' }
+  }
+  let stat
+  try {
+    stat = fs.statSync(target)
+  } catch {
+    return { ok: false, code: 'NO_FILE', message: target }
+  }
+  if (!stat.isFile()) return { ok: false, code: 'NOT_A_FILE', message: target }
+  if (stat.size > MAX_EDIT_BYTES) {
+    return { ok: false, code: 'TOO_LARGE', message: '图纸超过 64 MB，编辑已跳过' }
+  }
+  return { ok: true, path: target }
+}
+
+/**
+ * Handler for POST /api/corn-cad/edit.
+ *
+ * Body: { file, workspace?, edits: [{ handle, op, value?, dx?, dy?, x?, y? }] }
+ *       or { file, workspace?, describe: true }
+ *
+ * `describe` lists every editable entity with its handle and geometry — the agent
+ * calls it before proposing an edit, so it never guesses a handle.
+ *
+ * Applied edits are written back in place after a timestamped backup. A failed
+ * edit writes nothing at all.
+ *
+ * @param {Request} request
+ * @returns {Promise<Response>}
+ */
+async function handleEdit(request) {
+  try {
+    const body = await request.json()
+    const resolved = resolveEditable(body?.file, body?.workspace)
+    if (resolved.ok !== true) return json({ ok: false, code: resolved.code, message: resolved.message }, 400)
+
+    const script = path.join(here, 'lib', 'dxf_edit.py')
+    if (!fs.existsSync(script)) {
+      return json({ ok: false, code: 'NO_EDITOR', message: `editor missing at ${script}` }, 500)
+    }
+
+    if (body?.describe === true) {
+      const result = await runEditScript(script, ['--file', resolved.path, '--describe'])
+      return json(result, result.ok === true ? 200 : 500)
+    }
+
+    const edits = Array.isArray(body?.edits) ? body.edits.slice(0, 200) : []
+    if (edits.length === 0) {
+      return json({ ok: false, code: 'NO_EDITS', message: 'edits 为空' }, 400)
+    }
+
+    // The helper takes edits from a file so the arguments stay shell-safe and the
+    // payload can be arbitrarily nested.
+    const temp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'corncad-edit-')), 'edits.json')
+    fs.writeFileSync(temp, JSON.stringify(edits), 'utf8')
+    const args = ['--file', resolved.path, '--edits', temp]
+    if (body?.dryRun === true) args.push('--dry-run')
+    const result = await runEditScript(script, args)
+    try { fs.rmSync(path.dirname(temp), { recursive: true, force: true }) } catch { /* best effort */ }
+
+    if (result.ok === true) result.file = resolved.path
+    return json(result, result.ok === true ? 200 : 400)
+  } catch (error) {
+    return json({ ok: false, code: 'FAILED', message: String((error && error.message) || error) }, 500)
+  }
+}
+
 /**
  * Mount the plugin's routes.
  * @param {any} ctx plugin context.
@@ -379,5 +580,88 @@ export function apply(ctx, config = {}) {
         fetch: () => json({ ok: true, background: theme.background, foreground: theme.foreground }),
       }),
     'dsh-corn-cad: theme route',
+  )
+  // The agent-facing half: a tool, so "把 165,105 那个孔改成 6.5" needs no shell
+  // command from the model and no hand-built ezdxf script.
+  ctx.effect(() => {
+    const tools = ctx.get('tools')
+    if (tools === undefined || tools === null || typeof tools.register !== 'function') {
+      return () => {}
+    }
+    return tools.register({
+      name: 'corncad_edit',
+      description:
+        'Read or edit the DXF drawing open in the Corn CAD sidebar preview. ' +
+        'Call with describe:true first to list entities and their handles, then send edits ' +
+        'addressed by handle. Every applied edit keeps a timestamped .bak next to the file, ' +
+        'and the sidebar refreshes itself because the document preview watches the file. ' +
+        'Only .dxf is editable; .dwg must be exported to DXF first.',
+      parameters: {
+        type: 'object',
+        properties: {
+          file: { type: 'string', description: 'Absolute path of the .dxf drawing, or a path relative to workspace.' },
+          workspace: { type: 'string', description: 'Workspace root, when file is relative.' },
+          describe: { type: 'boolean', description: 'List editable entities with handles instead of editing.' },
+          dryRun: { type: 'boolean', description: 'Validate the edits without writing the file.' },
+          edits: {
+            type: 'array',
+            description: 'Edits to apply together. A failing edit writes nothing at all.',
+            items: {
+              type: 'object',
+              properties: {
+                handle: { type: 'string', description: 'Entity handle from describe.' },
+                op: {
+                  type: 'string',
+                  enum: ['radius', 'text', 'mtext', 'height', 'layer', 'color', 'move', 'center', 'delete'],
+                },
+                value: { description: 'New value for radius / text / mtext / height / layer / color.' },
+                dx: { type: 'number', description: 'move: X delta.' },
+                dy: { type: 'number', description: 'move: Y delta.' },
+                x: { type: 'number', description: 'center: new X.' },
+                y: { type: 'number', description: 'center: new Y.' },
+              },
+              required: ['handle', 'op'],
+            },
+          },
+        },
+        required: ['file'],
+      },
+      output: {
+        schema: { type: 'object' },
+        render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+      },
+      async execute(args) {
+        const resolved = resolveEditable(args?.file, args?.workspace)
+        if (resolved.ok !== true) return { ok: false, code: resolved.code, message: resolved.message }
+        const script = path.join(here, 'lib', 'dxf_edit.py')
+        if (!fs.existsSync(script)) return { ok: false, code: 'NO_EDITOR', message: script }
+        if (args?.describe === true) {
+          return await runEditScript(script, ['--file', resolved.path, '--describe'])
+        }
+        const edits = Array.isArray(args?.edits) ? args.edits : []
+        if (edits.length === 0) return { ok: false, code: 'NO_EDITS', message: 'edits 为空' }
+        const temp = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'corncad-tool-')), 'edits.json')
+        fs.writeFileSync(temp, JSON.stringify(edits), 'utf8')
+        const argv = ['--file', resolved.path, '--edits', temp]
+        if (args?.dryRun === true) argv.push('--dry-run')
+        const result = await runEditScript(script, argv)
+        try { fs.rmSync(path.dirname(temp), { recursive: true, force: true }) } catch { /* best effort */ }
+        if (result.ok === true) result.file = resolved.path
+        return result
+      },
+    })
+  }, 'dsh-corn-cad: edit tool')
+
+  // The only route that writes. It refuses anything but a real .dxf, and the
+  // editor keeps a timestamped backup beside the drawing before replacing it.
+  ctx.effect(
+    () =>
+      ctx.connection.fetch.register({
+        path: '/api/corn-cad/edit',
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: (request) => handleEdit(request),
+      }),
+    'dsh-corn-cad: edit route',
   )
 }

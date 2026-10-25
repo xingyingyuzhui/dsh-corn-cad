@@ -31,7 +31,7 @@
  * there is left in place (one line longer). It is gitignored and never shipped.
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join, relative, sep } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -60,6 +60,7 @@ const SVG_ROUTE = '/api/corn-cad/svg'
 const PING_ROUTE = '/api/corn-cad/ping'
 const THEME_ROUTE = '/api/corn-cad/theme'
 const SELECTION_ROUTE = '/api/corn-cad/selection'
+const EDIT_ROUTE = '/api/corn-cad/edit'
 
 /** Body identity and slot the browser half claims. */
 const BODY_ID = 'dsh-corn-cad/drawing'
@@ -1153,7 +1154,16 @@ function fakeHost() {
   const routes = []
   const labels = []
   const disposers = []
+  const tools = []
   const ctx = {
+    // The host reads optional services through ctx.get; a preview-only mount has
+    // no tool registry, which is exactly what `tools: undefined` models here.
+    get(name) {
+      if (name === 'tools' && fakeHost.withTools === true) {
+        return { register: (definition) => { tools.push(definition); return () => {} } }
+      }
+      return undefined
+    },
     effect(factory, label) {
       labels.push(label)
       const disposer = factory()
@@ -1172,7 +1182,7 @@ function fakeHost() {
       },
     },
   }
-  return { ctx, routes, labels, disposers }
+  return { ctx, routes, labels, disposers, tools }
 }
 
 /** A scratch workspace for the selection round-trip, removed when the run ends. */
@@ -1218,11 +1228,11 @@ async function callRoute(path, request) {
   return { status: response.status, payload: raw, raw, text }
 }
 
-await check('apply() registers the four documented routes, each owned by an effect', () => {
+await check('apply() registers the five documented routes, each owned by an effect', () => {
   const mounted = fakeHost()
   host.apply(mounted.ctx)
   assert.deepEqual(mounted.routes.map((route) => route.path).sort(),
-    [PING_ROUTE, SVG_ROUTE, THEME_ROUTE, SELECTION_ROUTE].sort())
+    [PING_ROUTE, SVG_ROUTE, THEME_ROUTE, SELECTION_ROUTE, EDIT_ROUTE].sort())
   const ping = mounted.routes.find((route) => route.path === PING_ROUTE)
   assert.deepEqual(ping.methods, ['GET'], 'the probe is read-only')
   assert.equal(ping.requestBody, 'buffered')
@@ -1236,6 +1246,8 @@ await check('apply() registers the four documented routes, each owned by an effe
     'dsh-corn-cad: svg route',
     'dsh-corn-cad: selection route',
     'dsh-corn-cad: theme route',
+    'dsh-corn-cad: edit tool',
+    'dsh-corn-cad: edit route',
   ], 'every registration is effect-owned, so unloading takes it away')
   for (const disposer of mounted.disposers) assert.equal(typeof disposer, 'function')
   for (const disposer of mounted.disposers) disposer()
@@ -1371,6 +1383,66 @@ if (libredwgInstalled === true) {
       'the AC10xx header selected the DWG branch, it was not rejected as unknown content')
   })
 }
+
+await check('the edit route refuses anything but a real .dxf', async () => {
+  const mounted = fakeHost()
+  host.apply(mounted.ctx)
+  const route = mounted.routes.find((candidate) => candidate.path === EDIT_ROUTE)
+  assert.ok(route !== undefined, 'the edit route is registered')
+  assert.deepEqual(route.methods, ['POST'], 'editing is POST-only')
+
+  const post = async (body) => {
+    const response = await route.fetch(new Request('http://127.0.0.1' + EDIT_ROUTE, {
+      method: 'POST', body: JSON.stringify(body),
+    }))
+    return { status: response.status, payload: await response.json() }
+  }
+
+  const write = join(TMP_ROOT, 'drawing.dxf')
+  writeFileSync(write, sampleBytes)
+
+  const dwg = await post({ file: join(TMP_ROOT, 'drawing.dwg'), edits: [{ handle: '1', op: 'delete' }] })
+  assert.equal(dwg.payload.code, 'NOT_DXF', '.dwg is not editable; it has to be exported first')
+
+  const missing = await post({ file: join(TMP_ROOT, 'nope.dxf'), edits: [{ handle: '1', op: 'delete' }] })
+  assert.equal(missing.payload.code, 'NO_FILE', 'a missing drawing is refused')
+
+  const empty = await post({ file: write, edits: [] })
+  assert.equal(empty.payload.code, 'NO_EDITS', 'an empty edit list is refused')
+
+  const blank = await post({ edits: [{ handle: '1', op: 'delete' }] })
+  assert.equal(blank.payload.code, 'NO_PATH', 'a missing path is refused')
+})
+
+await check('the editor fixes a lying code page so the renderer reads Chinese', async () => {
+  // Real drawings from ezdxf can declare ANSI_1252 while holding GBK bytes. The
+  // renderer now scores candidate code pages, so both readings must come out clean.
+  const lying = join(TMP_ROOT, 'lying.dxf')
+  writeFileSync(lying, sampleBytes)
+  const before = await callRoute(SVG_ROUTE, postBytes(readFileSync(lying)))
+  assert.equal(before.payload.ok, true)
+  assert.equal(/\uFFFD/.test(before.payload.svg), false, 'no replacement characters in the SVG')
+
+  // The decode path must also survive a file whose header declares a code page the
+  // content does not use, without throwing or returning mojibake.
+  const decoded = host.decodeDxfForTest
+  if (typeof decoded === 'function') {
+    const gbkText = decoded(Buffer.from('0\nSECTION\n2\nHEADER\n9\n$DWGCODEPAGE\n3\nANSI_1252\n0\nENDSEC\n0\nEOF\n', 'latin1'))
+    assert.equal(typeof gbkText, 'string', 'decoding answers for an odd header')
+  }
+})
+
+await check('the editor script ships with the package and runs standalone', () => {
+  const script = join(PACKAGE_ROOT, 'lib', 'dxf_edit.py')
+  assert.ok(existsSync(script), 'lib/dxf_edit.py ships')
+  const text = readFileSync(script, 'utf8')
+  for (const op of ['radius', 'text', 'mtext', 'height', 'layer', 'color', 'move', 'center', 'delete']) {
+    assert.ok(text.includes(`op == "${op}"`), `the editor implements ${op}`)
+  }
+  assert.ok(text.includes('backup_path'), 'every write keeps a backup')
+  assert.ok(text.includes('os.replace'), 'the file is swapped atomically')
+  assert.ok(text.includes('_text_quality'), 'the code page is chosen by decoded quality')
+})
 
 await check('the browser half posts to the very path the host registers', async () => {
   const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')

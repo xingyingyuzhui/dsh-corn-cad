@@ -104,6 +104,70 @@ file went. The record carries `handle`, so the agent can address the exact line 
 
 ---
 
+## Letting the agent edit the drawing
+
+Beyond previewing, the plugin lets the agent **actually modify a DXF file**, with the sidebar
+refreshing itself afterwards.
+
+### How to ask
+
+Just say it:
+
+> make the hole at 165,105 diameter 16
+> change the title to "plate 240x160"
+> move those two holes 5mm right
+
+The agent lists entities, addresses them by handle, applies the change, and you watch the drawing
+update.
+
+### What happens underneath
+
+1. **Look**: the `corncad_edit` tool with `describe: true` returns every editable entity's handle,
+   type, layer and geometry
+2. **Edit**: structured edits by handle (`radius` / `text` / `move` / `layer` / `color` / `delete` …)
+3. **Back up**: the original is copied to `<drawing>.<timestamp>.bak` before any write
+4. **Swap atomically**: a temp file first, then `os.replace`, so a crash cannot leave a half file
+5. **Refresh**: the document preview's `autoRefresh` (on by default) sees the new file version,
+   re-reads the bytes and hands them back to the renderer
+
+### Boundaries
+
+| Rule | Detail |
+|---|---|
+| `.dxf` only | `.dwg` is binary and must be exported to DXF first |
+| Path checks | must be a real file — not a directory, not a symlink escape |
+| All or nothing | if any edit in a batch fails, the file is left untouched |
+| Size cap | drawings over 64 MB are refused for editing |
+| Always backed up | every write leaves a `.bak` you can roll back to |
+
+### Dependency
+
+Editing uses [ezdxf](https://ezdxf.mozman.at/) (Python). The plugin finds an interpreter that has it,
+preferring the Python runtime bundled with DSH:
+
+```bash
+# handled by this repo's install step; install manually if missing
+<python on a PEP 668 host> python3 -m pip install ezdxf
+# or point at one explicitly
+export CORNCAD_PYTHON=/path/to/python3
+```
+
+Without ezdxf, **previewing still works**; only editing answers `NO_EZDXF` with instructions.
+
+### The Chinese encoding trap
+
+ezdxf can write a **self-contradictory** file: declaring `ANSI_1252` (R2007+ must be UTF-8) while
+holding GBK bytes. Any reader that trusts the header — AutoCAD included — shows mojibake.
+
+How this plugin handles it:
+
+- **Reading**: decode with the declaration, then score the result (fewer U+FFFD is better) across
+  `utf-8 / gbk / big5 / shift_jis` and keep the cleanest
+- **Writing**: R2007+ is always UTF-8 with a corrected `$DWGCODEPAGE`; older versions are written in
+  their real code page
+
+---
+
 ## Installation
 
 Install the [DeepSeek Harness desktop app](https://www.deepseek.com/download/) first.
@@ -200,8 +264,8 @@ all decode correctly.
 
 ## Self-check
 
-The self-check needs no network, no Harness, no React and no installed dependencies. plain Node runs all 36 checks;
-a clean run prints `36/36 checks passed` and exits 0, any failure exits non-zero, so it drops straight
+The self-check needs no network, no Harness, no React and no installed dependencies. plain Node runs all 39 checks;
+a clean run prints `39/39 checks passed` and exits 0, any failure exits non-zero, so it drops straight
 into CI.
 
 ```bash
