@@ -235,4 +235,7 @@ vendor/               @mlightcad/libredwg-web（GPL-3.0，仅 .dwg 需要）
 
 ## License
 
+MIT —— 本仓库代码。完整声明见 [LICENSE](LICENSE)，第三方组件（含 GPL-3.0 的
+DWG 解码器）见 [THIRD-PARTY.md](THIRD-PARTY.md)。
+
 [MIT](LICENSE) © 2026 xingyingyuzhui

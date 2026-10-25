@@ -251,4 +251,8 @@ the dependency from a registry, or choose another DWG decoder.
 
 ## License
 
+MIT for this repository's code. See [LICENSE](LICENSE) for the full text and
+[THIRD-PARTY.md](THIRD-PARTY.md) for third-party components, including the
+GPL-3.0 DWG decoder.
+
 [MIT](LICENSE) © 2026 xingyingyuzhui

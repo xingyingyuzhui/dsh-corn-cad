@@ -1280,7 +1280,7 @@ await check('no leaked credential, no personal absolute path, and the author nam
   const credentials = new RegExp('(' + words.join('|') + ')', 'i')
   const personal = /(C:\\Users|\/mnt\/[cd]\/|\/home\/)/
   assert.equal(typeof COPYRIGHT_HOLDER, 'string', 'LICENSE names a copyright holder')
-  const allowed = new Set(['LICENSE', 'package.json', 'README.md', 'README.en.md', 'CHANGES.md'])
+  const allowed = new Set(['LICENSE', 'THIRD-PARTY.md', 'package.json', 'README.md', 'README.en.md', 'CHANGES.md'])
   for (const file of treeFiles()) {
     const text = readFileSync(join(PACKAGE_ROOT, file), 'utf8')
     // Binary assets (the brand PNGs) cannot carry a scanned secret in a way this
@@ -1312,9 +1312,14 @@ await check('no leaked credential, no personal absolute path, and the author nam
     assert.equal(manifest.files.some((pattern) => pattern === name || pattern.endsWith('/' + name)), false,
       `${name} must not be covered by package.json files`)
   }
-  const ignore = readFileSync(join(PACKAGE_ROOT, '.gitignore'), 'utf8')
-  for (const pattern of ['node_modules/', '*.log', '.mount.log', 'pnpm-lock.yaml', 'package-lock.json', '.DS_Store', 'Thumbs.db']) {
-    assert.equal(ignore.includes(pattern), true, `.gitignore covers ${pattern}`)
+  // npm strips .gitignore from a published tarball, so this only holds for a
+  // checkout — the packaged copy legitimately has none.
+  const ignorePath = join(PACKAGE_ROOT, '.gitignore')
+  if (existsSync(ignorePath)) {
+    const ignore = readFileSync(ignorePath, 'utf8')
+    for (const pattern of ['node_modules/', '*.log', '.mount.log', 'pnpm-lock.yaml', 'package-lock.json', '.DS_Store', 'Thumbs.db']) {
+      assert.equal(ignore.includes(pattern), true, `.gitignore covers ${pattern}`)
+    }
   }
   assert.match(LICENCE_TEXT, /^MIT License\n\nCopyright \(c\) 2026 /)
   assert.match(LICENCE_TEXT, /WITHOUT WARRANTY OF ANY KIND/)

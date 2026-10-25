@@ -47,6 +47,7 @@
     "README.md",
     "README.en.md",
     "LICENSE",
+    "THIRD-PARTY.md",
     "CHANGES.md",
     "vendor/**"
   ],
