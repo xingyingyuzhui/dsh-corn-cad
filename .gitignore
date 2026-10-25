@@ -18,3 +18,7 @@ desktop.ini
 # CAD selection records: written next to a drawing at runtime, never part of the
 # plugin's own source.
 .corncad/
+
+# Python bytecode from the DXF editor (it runs as a subprocess).
+__pycache__/
+*.pyc

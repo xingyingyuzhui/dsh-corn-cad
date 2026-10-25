@@ -28,6 +28,7 @@ out what handles exist before proposing an edit.
 
 import argparse
 import json
+import math
 import os
 import shutil
 import sys
@@ -337,28 +338,163 @@ def describe(doc):
     return out
 
 
-def find(doc, handle):
-    """Entity by handle anywhere in the document, or None."""
+# Layout blocks mirror modelspace: walking both would visit the same entity twice,
+# which then looks like "two equally close candidates" to the matcher and gets a
+# perfectly unambiguous pick refused.
+LAYOUT_BLOCKS = {"*Model_Space", "*Paper_Space", "*Model_Space0", "*Paper_Space0"}
+
+
+def _iter_entities(doc):
+    """Modelspace plus every non-layout block, each entity exactly once."""
     for entity in doc.modelspace():
-        if entity.dxf.handle == handle:
-            return entity
+        yield entity
     for block in doc.blocks:
+        if block.name in LAYOUT_BLOCKS:
+            continue
         for entity in block:
-            if getattr(entity.dxf, "handle", None) == handle:
-                return entity
+            yield entity
+
+
+def find(doc, handle):
+    """Entity by handle anywhere in the document, or None.
+
+    A drawing written without group code 5 (hand-written fixtures, thin exporters,
+    pre-R2000 output) has no usable handle: the preview reports an empty string
+    while a reader such as ezdxf invents one. Those picks are addressed
+    geometrically instead — see {@link find_by_geometry}.
+    """
+    for entity in _iter_entities(doc):
+        if getattr(entity.dxf, "handle", None) == handle:
+            return entity
     return None
+
+
+def entity_points(entity):
+    """A few world-space points that characterise the entity, for matching."""
+    kind = entity.dxftype()
+    try:
+        if kind == "CIRCLE":
+            center = entity.dxf.center
+            radius = float(entity.dxf.radius)
+            return [(center.x - radius, center.y - radius), (center.x + radius, center.y + radius)]
+        if kind == "ARC":
+            # The arc's own sweep, not its full circle: the preview reports the arc
+            # bounds, and a circle-wide box would never match them.
+            center = entity.dxf.center
+            radius = float(entity.dxf.radius)
+            start = float(entity.dxf.start_angle) * math.pi / 180.0
+            end = float(entity.dxf.end_angle) * math.pi / 180.0
+            while end <= start:
+                end += math.pi * 2
+            points = [(center.x, center.y)]
+            steps = 48
+            for index in range(steps + 1):
+                angle = start + (end - start) * (index / steps)
+                points.append((center.x + radius * math.cos(angle), center.y + radius * math.sin(angle)))
+            return points
+        if kind == "LINE":
+            start, end = entity.dxf.start, entity.dxf.end
+            return [(start.x, start.y), (end.x, end.y)]
+        if kind in ("LWPOLYLINE", "POLYLINE") and entity.is_2d_polyline:
+            return [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+        if kind in ("TEXT", "MTEXT"):
+            insert = entity.dxf.insert
+            return [(insert.x, insert.y)]
+        if kind == "ELLIPSE":
+            center = entity.dxf.center
+            return [(center.x, center.y)]
+        if kind in ("POINT",):
+            location = entity.dxf.location
+            return [(location.x, location.y)]
+    except Exception:
+        pass
+    return []
+
+
+def find_by_geometry(doc, pick, tolerance=0.5):
+    """Find the entity a preview pick describes, without relying on a handle.
+
+    The preview sends what it knows for certain: the DXF type, the layer, and the
+    world-space bounds it drew. Matching on those three is enough to be unambiguous
+    in practice, and a wrong match is refused rather than guessed when several
+    candidates are equally close.
+
+    @param doc      the drawing.
+    @param pick     {type, layer, bbox?, id?} from the selection record.
+    @param tolerance upper bound, in drawing units, on how far a candidate may sit.
+    """
+    wanted_type = str(pick.get("type") or "").upper()
+    wanted_layer = pick.get("layer")
+    bbox = pick.get("bbox")
+    if wanted_type == "" or not isinstance(bbox, list) or len(bbox) < 4:
+        return None
+    target_cx = (bbox[0] + bbox[2]) / 2.0
+    target_cy = (bbox[1] + bbox[3]) / 2.0
+    target_w = bbox[2] - bbox[0]
+    target_h = bbox[3] - bbox[1]
+
+    scored = []
+    for entity in _iter_entities(doc):
+        if entity.dxftype().upper() != wanted_type:
+            continue
+        if wanted_layer is not None and entity.dxf.layer != wanted_layer:
+            continue
+        points = entity_points(entity)
+        if not points:
+            continue
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        dx = abs(cx - target_cx)
+        dy = abs(cy - target_cy)
+        dw = abs((max(xs) - min(xs)) - target_w)
+        dh = abs((max(ys) - min(ys)) - target_h)
+        # A relative scale keeps the tolerance meaningful for very small parts.
+        scale = max(1.0, abs(target_w), abs(target_h))
+        distance = (dx + dy) / scale + (dw + dh) / (scale * 4.0)
+        scored.append((distance, entity))
+
+    if not scored:
+        return None
+    scored.sort(key=lambda pair: pair[0])
+    best_distance, best_entity = scored[0]
+    if best_distance > tolerance:
+        return None
+    if len(scored) > 1:
+        runner_distance = scored[1][0]
+        # Two candidates this close means the pick is ambiguous; refusing beats
+        # editing the wrong hole.
+        if abs(runner_distance - best_distance) < 0.02:
+            return None
+    return best_entity
 
 
 def apply_edit(doc, edit):
     """Apply one edit. Returns a human-readable note, or raises ValueError."""
     handle = str(edit.get("handle") or "").strip()
     op = str(edit.get("op") or "").strip()
-    if handle == "":
-        raise ValueError("edit is missing a handle")
     if op == "":
         raise ValueError("edit is missing an op")
-    entity = find(doc, handle)
+
+    # Two ways to name an entity. A handle is exact; when the drawing has none
+    # (the preview then reports ""), fall back to the geometry the pick carried.
+    entity = None
+    how = None
+    if handle != "":
+        entity = find(doc, handle)
+        how = f"handle {handle}"
     if entity is None:
+        pick = edit.get("pick")
+        if not isinstance(pick, dict) and handle == "":
+            pick = edit if edit.get("type") else None
+        if isinstance(pick, dict):
+            entity = find_by_geometry(doc, pick)
+            if entity is not None:
+                how = f"{pick.get('type')} near {[round(v, 2) for v in pick.get('bbox', [])]}"
+    if entity is None:
+        if handle == "":
+            raise ValueError("edit names no entity: give a handle, or a pick with type + layer + bbox")
         raise ValueError(f"no entity with handle {handle}")
     kind = entity.dxftype()
 
@@ -369,13 +505,13 @@ def apply_edit(doc, edit):
         if value <= 0:
             raise ValueError("radius must be positive")
         entity.dxf.radius = value
-        return f"{kind} {handle} radius -> {value}"
+        return f"{kind} ({how}) radius -> {value}"
 
     if op == "text":
         if kind != "TEXT":
             raise ValueError(f"{kind} is not a TEXT entity")
         entity.dxf.text = str(edit["value"])
-        return f"TEXT {handle} -> {edit['value']!r}"
+        return f"TEXT ({how}) -> {edit['value']!r}"
 
     if op == "mtext":
         if kind != "MTEXT":

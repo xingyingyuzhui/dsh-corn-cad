@@ -264,8 +264,8 @@ all decode correctly.
 
 ## Self-check
 
-The self-check needs no network, no Harness, no React and no installed dependencies. plain Node runs all 41 checks;
-a clean run prints `41/41 checks passed` and exits 0, any failure exits non-zero, so it drops straight
+The self-check needs no network, no Harness, no React and no installed dependencies. plain Node runs all 43 checks;
+a clean run prints `43/43 checks passed` and exits 0, any failure exits non-zero, so it drops straight
 into CI.
 
 ```bash

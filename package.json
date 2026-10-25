@@ -1,6 +1,6 @@
 {
   "name": "dsh-corn-cad",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": false,
   "type": "module",
   "description": "侧边栏 DXF/DWG 预览与画板：打开图纸即可查看，右键圈选图上任意区域，在弹出的气泡里写指令发给 agent —— agent 知道是哪张图的哪一部分。 A DSH sidebar DXF/DWG previewer with a right-drag selection board that sends the circled region to the agent.",

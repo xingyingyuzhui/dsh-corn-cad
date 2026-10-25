@@ -1461,6 +1461,30 @@ await check('the editor fixes a lying code page so the renderer reads Chinese', 
   }
 })
 
+await check('an arc pick carries the arc bounds, not its full circle', () => {
+  // A 30..210 arc of r=18 at (45,32.5) spans y 23.5..50.5. Reporting the whole
+  // circle (14.5..50.5) made a band selection grab the arc from empty space and
+  // print a range the user never circled.
+  const pickable = dxfToSvg(sampleText, { ...RENDER_OPTIONS, pickable: true })
+  const arc = pickable.picks.find((pick) => pick.type === 'ARC')
+  assert.ok(arc !== undefined, 'the sample has an arc')
+  assert.ok(arc.bbox[1] > 20,
+    `arc lower bound ${arc.bbox[1]} is the arc, not the circle's 14.5`)
+  assert.equal(Math.round(arc.bbox[1] * 10) / 10, 23.5, 'lower bound is the arc extreme')
+  assert.equal(Math.round(arc.bbox[3] * 10) / 10, 50.5, 'upper bound is the arc extreme')
+})
+
+await check('the editor can address an entity by geometry when there is no handle', () => {
+  const text = readFileSync(join(PACKAGE_ROOT, 'lib', 'dxf_edit.py'), 'utf8')
+  assert.ok(text.includes('def find_by_geometry'), 'a pick can name an entity geometrically')
+  // Same trap as the renderer: an entity's bounds must come from its own shape.
+  assert.ok(text.includes('if kind == "ARC"'), 'arc matching uses the sweep')
+  assert.ok(text.includes('start_angle'), 'and reads the arc angles')
+  // Walking modelspace and the layout blocks together visited every entity twice,
+  // which the ambiguity guard then read as two candidates.
+  assert.ok(text.includes('LAYOUT_BLOCKS'), 'layout blocks are not walked twice')
+})
+
 await check('the editor repairs a drawing that omits subclass markers', () => {
   const script = join(PACKAGE_ROOT, 'lib', 'dxf_edit.py')
   const text = readFileSync(script, 'utf8')
@@ -1563,6 +1587,8 @@ await check('package.json is the bundle manifest the repo kit requires', () => {
 
 await check('every file in the tree is covered by package.json files', () => {
   const always = new Set(['package.json', '.gitignore'])
+  // Bytecode left by running the Python editor is a runtime dropping, not a file.
+  const ignored = (file) => file.includes('__pycache__') || file.endsWith('.pyc') || file.includes('/.corncad/')
   const patterns = manifest.files
   /**
    * npm packlist globbing: `*` matches inside one path segment, `**` spans any
@@ -1588,7 +1614,7 @@ await check('every file in the tree is covered by package.json files', () => {
       return walk(0, 0)
     })
   }
-  const uncovered = treeFiles().filter((file) => always.has(file) === false && matches(file) === false)
+  const uncovered = treeFiles().filter((file) => always.has(file) === false && ignored(file) === false && matches(file) === false)
   assert.deepEqual(uncovered, [], 'nothing in the tree is left out of the published package')
   for (const required of ['README.en.md', 'LICENSE', 'test/*.mjs', 'cordis.patch.yml', 'icon.svg']) {
     assert.equal(patterns.includes(required), true, `files lists ${required}`)
