@@ -51,10 +51,19 @@ The left button is always navigation: press and drag to pan, press without movin
 to select. Circling belongs to the right button, so the two never fight over the
 same gesture and the drawing is never stuck.
 
-Selection is decided by **real geometric coverage**, not bounding-box intersection. The sheet border is
-a single 420×297 polyline and table rules span the whole sheet, so a bbox test drags the entire frame
-in wherever you drag. This plugin instead counts how much of each entity's outline falls inside the
-band: fully inside, or ≥50% of the outline covered, and the entity is taken.
+The **Region / Entity** switch on the toolbar decides the granularity of a band selection:
+
+| Mode | Meaning | Use it for |
+|---|---|---|
+| **Region** (default) | Take what the band touches, and **record only that run**. A centre line spanning the sheet is grabbed by any short segment of it | Editing a detail |
+| **Entity** | Take any entity the band covers, whole. Entities the band barely covers are left out (so a large frame is not dragged in) | A whole line or block |
+
+In region mode each pick carries `inBand`: the polyline of that entity lying inside the band, in DXF
+world coordinates. The message to the agent states the mode explicitly — "region, edit the circled
+part" — so a long line is never rewritten end to end by accident.
+
+Neither mode uses bounding-box intersection. The sheet border is a single 420×297 polyline and table
+rules span the whole sheet, so a bbox test drags the entire frame in wherever you drag.
 
 ### Bubble → agent
 
@@ -191,8 +200,8 @@ all decode correctly.
 
 ## Self-check
 
-The self-check needs no network, no Harness, no React and no installed dependencies. plain Node runs all 34 checks;
-a clean run prints `34/34 checks passed` and exits 0, any failure exits non-zero, so it drops straight
+The self-check needs no network, no Harness, no React and no installed dependencies. plain Node runs all 36 checks;
+a clean run prints `36/36 checks passed` and exits 0, any failure exits non-zero, so it drops straight
 into CI.
 
 ```bash

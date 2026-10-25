@@ -724,13 +724,24 @@ async function mountBody(respond, options = {}) {
     return tree
   }
 
+  /**
+   * Render until state stops changing.
+   *
+   * A tree produced before a state change has handlers closing over the old
+   * values, so callers must take their elements from the returned tree — that is
+   * how a mode switch reaches the canvas handler.
+   *
+   * `dirty` is only raised by a setter that actually changes a value, so the loop
+   * has to allow one extra pass after the last change to pick it up.
+   */
   const render = async (props) => {
-    let tree = null
-    for (let round = 0; round < 12; round += 1) {
+    let tree = pass(props)
+    for (const effect of runtime.takeEffects()) await effect()
+    await settle()
+    for (let round = 0; round < 12 && runtime.takeDirty(); round += 1) {
       tree = pass(props)
       for (const effect of runtime.takeEffects()) await effect()
       await settle()
-      if (runtime.takeDirty() === false) break
     }
     return tree
   }
@@ -870,6 +881,133 @@ await check('a right-drag across a region selects only what it covers, and opens
   }
 })
 
+await check('a band through the middle of a full-width line takes it, and only the circled run', async () => {
+  // A centre line spanning the whole sheet is the case that exposed the old
+  // whole-entity rule: its outline is almost entirely outside a small band, so a
+  // 50%-coverage test never selected it no matter where the user dragged.
+  const payload = {
+    ok: true, kind: 'dxf', svg: FLAT_SVG, stats: sample.stats,
+    picks: [
+      { id: 'e1', type: 'LINE', layer: 'CENTER', handle: 'C1', depth: 0,
+        bbox: [0, 75, 420, 75], pts: [0, 75, 420, 75] },
+    ],
+  }
+  const mounted = await mountBody(async () => ({ ok: true, status: 200, json: async () => payload }))
+  try {
+    const props = bodyProps(sampleBytes, mounted.scrollport)
+    mounted.useCanvas(FLAT_SVG)
+    let tree = await mounted.render(props)
+    const canvas = canvasSurface(tree)
+
+    // A small band well inside the sheet: screen y 20..30 maps to DXF y 70..80
+    // through the drawing's translate(0 100) wrapper.
+    canvas.props.onPointerDown({ button: 2, clientX: 100, clientY: 20, shiftKey: false, preventDefault() {} })
+    canvas.props.onPointerMove({ clientX: 140, clientY: 30 })
+    canvas.props.onPointerUp({ button: 2, clientX: 140, clientY: 30, shiftKey: false, preventDefault() {} })
+    tree = await mounted.render(props)
+
+    assert.equal(elementsWithClass(tree, 'corncad-bubble').length, 1, 'the bubble opens for a region pick')
+
+    const post = mounted.calls.find((call) => call.url === SELECTION_ROUTE)
+    assert.ok(post, 'the region is recorded')
+    const body = JSON.parse(post.init.body)
+
+    const frame = body.picks.find((pick) => pick.id === 'e1')
+    assert.ok(frame !== undefined, 'a line crossed at one point is selected even when mostly outside the band')
+    assert.ok(Array.isArray(frame.inBand) && frame.inBand.length >= 4,
+      'the pick carries the clipped run, not just the entity')
+
+    // Every clipped point has to lie inside the band, and the run must be much
+    // smaller than the entity, which is the whole point of clipping.
+    for (let i = 0; i < frame.inBand.length; i += 2) {
+      const x = frame.inBand[i], y = frame.inBand[i + 1]
+      assert.ok(x >= 99 && x <= 141, `clipped x ${x} is inside the band`)
+      assert.ok(y >= 69 && y <= 81, `clipped y ${y} is inside the band`)
+    }
+    // A two-point line keeps two points after clipping, so compare extent rather
+    // than point count: the run must be a small part of the full-length line.
+    const span = (flat) => {
+      let min = Infinity, max = -Infinity
+      for (let i = 0; i < flat.length; i += 2) {
+        min = Math.min(min, flat[i]); max = Math.max(max, flat[i])
+      }
+      return max - min
+    }
+    assert.ok(span(frame.inBand) < span(frame.pts) / 4,
+      `the run (${span(frame.inBand)}) is a part of the entity (${span(frame.pts)}), not the whole`)
+
+    const whole = body.picks.filter((pick) => pick.inBand === undefined).map((pick) => pick.id)
+    assert.ok(!whole.includes('e1'), 'the centre line is not recorded as an unclipped whole')
+  } finally {
+    mounted.unmount()
+  }
+})
+
+await check('the toolbar switches between region and entity selection', async () => {
+  // The same tiny band, the same spanning centre line: region takes it, entity
+  // mode does not, because the band covers far less than half of the line.
+  const payload = {
+    ok: true, kind: 'dxf', svg: FLAT_SVG, stats: sample.stats,
+    picks: [
+      { id: 'e1', type: 'LINE', layer: 'CENTER', handle: 'C1', depth: 0,
+        bbox: [0, 75, 420, 75], pts: [0, 75, 420, 75] },
+    ],
+  }
+  const drag = (canvas) => {
+    canvas.props.onPointerDown({ button: 2, clientX: 100, clientY: 20, shiftKey: false, preventDefault() {} })
+    canvas.props.onPointerMove({ clientX: 140, clientY: 30 })
+    canvas.props.onPointerUp({ button: 2, clientX: 140, clientY: 30, shiftKey: false, preventDefault() {} })
+  }
+  const pickIds = (mounted) => {
+    const post = mounted.calls.filter((call) => call.url === SELECTION_ROUTE).pop()
+    return post === undefined ? [] : JSON.parse(post.init.body).picks.map((pick) => pick.id)
+  }
+
+  const mounted = await mountBody(async () => ({ ok: true, status: 200, json: async () => payload }))
+  try {
+    const props = bodyProps(sampleBytes, mounted.scrollport)
+    mounted.useCanvas(FLAT_SVG)
+    let tree = await mounted.render(props)
+
+    const segmented = findElement(tree, (el) => el.props?.className === 'corncad-seg')
+    assert.ok(segmented, 'the toolbar carries the mode switch')
+    const buttons = segmented.children.filter((child) => child && child.type === 'button')
+    assert.equal(buttons.length, 2, 'two modes, side by side')
+    assert.deepEqual(buttons.map((b) => b.props['aria-pressed']), ['true', 'false'],
+      'region is the default')
+    assert.deepEqual(buttons.map((b) => b.children[0]), ['区域', '图元'], 'and the labels are short')
+
+    // Region mode (default): the crossed line is taken, clipped to the band.
+    drag(canvasSurface(tree))
+    tree = await mounted.render(props)
+    assert.deepEqual(pickIds(mounted), ['e1'], 'region mode takes a line the band only crosses')
+    const regionPick = JSON.parse(mounted.calls.filter((c) => c.url === SELECTION_ROUTE).pop().init.body).picks[0]
+    assert.ok(Array.isArray(regionPick.inBand), 'and records the circled run')
+
+    // Switch to entity mode and drag the same band.
+    const entityButton = segmented.children.filter((child) => child && child.type === 'button')[1]
+    entityButton.props.onClick({ preventDefault() {} })
+    tree = await mounted.render(props)
+    // The canvas element is rebuilt each render, so re-acquire it after the switch.
+    assert.ok(canvasSurface(tree), 'the canvas survives the mode switch')
+    const switched = findElement(tree, (el) => el.props?.className === 'corncad-seg')
+    const pressed = switched.children.filter((c) => c && c.type === 'button').map((b) => b.props['aria-pressed'])
+    assert.deepEqual(pressed, ['false', 'true'], `entity mode is now active (got ${JSON.stringify(pressed)})`)
+    // `tree` was rendered before the switch; take the canvas from the tree the
+    // switch produced, whose handlers close over the new mode.
+    // Count the records before the second drag so the assertion cannot read the
+    // region-mode record left by the first one.
+    const postsBefore = mounted.calls.filter((call) => call.url === SELECTION_ROUTE).length
+    drag(canvasSurface(tree))
+    await mounted.render(props)
+    const postsAfter = mounted.calls.filter((call) => call.url === SELECTION_ROUTE).length
+    assert.equal(postsAfter, postsBefore,
+      'entity mode records nothing for a line the band barely covers')
+  } finally {
+    mounted.unmount()
+  }
+})
+
 await check('a plain left drag pans the drawing instead of starting a selection', async () => {
   const mounted = await mountBody(async () => ({ ok: true, status: 200, json: async () => readyWithPicks() }))
   try {
@@ -965,7 +1103,8 @@ await check('sending from the bubble goes through the session scope and quotes t
     const prompt = sent[0]
     assert.match(prompt, /这几根线改成黑色/, 'the prompt carries what the user typed')
     assert.match(prompt, /plate 图纸\.dxf/, 'and which drawing')
-    assert.match(prompt, /e1\(LINE\)/, 'and which entities')
+    // A partial pick is labelled as such, so the entity id is followed by a note.
+    assert.match(prompt, /e1\(LINE/, 'and which entities')
     assert.match(prompt, /范围/, 'and where in the drawing')
   } finally {
     mounted.unmount()

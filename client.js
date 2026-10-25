@@ -46,6 +46,11 @@ window.__ModuleLoader__.load({
         selected: '已选中 {count} 个',
         clearSel: '清除',
         hint: '左键拖动平移 · 右键框选发消息',
+        modeRegion: '区域',
+        modeRegionTip: '框选模式：区域 —— 框到哪就选哪，长线只取框内那一段',
+        modeEntity: '图元',
+        modeEntityTip: '框选模式：图元 —— 框到的图元整体选中，长线也整条算',
+        modeLabel: '框选模式',
         bubbleTitle: '这块怎么改？',
         bubblePlaceholder: '例如：这几根线改成黑色 / 整体上移 5mm',
         bubbleSend: '发送',
@@ -69,6 +74,11 @@ window.__ModuleLoader__.load({
         selected: '{count} selected',
         clearSel: 'Clear',
         hint: 'Drag to pan · right-drag to circle and send',
+        modeRegion: 'Region',
+        modeRegionTip: 'Selection mode: Region — take what the band touches, and only that run of a long line',
+        modeEntity: 'Entity',
+        modeEntityTip: 'Selection mode: Entity — take any entity the band touches, whole',
+        modeLabel: 'Selection mode',
         bubbleTitle: 'How should this change?',
         bubblePlaceholder: 'e.g. make these lines black / move up 5mm',
         bubbleSend: 'Send',
@@ -87,6 +97,12 @@ window.__ModuleLoader__.load({
       '.corncad-btn{min-width:26px;height:22px;padding:0 8px;border:1px solid rgba(127,127,127,.35);border-radius:5px;background:transparent;color:inherit;font-size:12px;line-height:1;cursor:pointer}',
       '.corncad-btn:hover{background:rgba(127,127,127,.12)}',
       '.corncad-meta{margin-left:auto;opacity:.6;font-variant-numeric:tabular-nums}',
+      // Segmented mode switch: two states, one control, sitting on the toolbar row.
+      '.corncad-seg{display:inline-flex;align-items:center;border:1px solid rgba(127,127,127,.35);border-radius:5px;overflow:hidden;flex:none}',
+      '.corncad-seg button{min-width:34px;height:22px;padding:0 7px;border:0;background:transparent;color:inherit;font-size:12px;line-height:1;cursor:pointer}',
+      '.corncad-seg button+button{border-left:1px solid rgba(127,127,127,.28)}',
+      '.corncad-seg button[aria-pressed="true"]{background:#2563eb;color:#fff}',
+      '.corncad-seg button:not([aria-pressed="true"]):hover{background:rgba(127,127,127,.12)}',
       '.corncad-notice{font-size:11px;padding:1px 6px;border-radius:4px;background:rgba(37,99,235,.12);color:#2563eb;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
       '.corncad-scroll{flex:1 1 auto;min-height:0;overflow:auto;background:var(--corncad-bg,#fff);display:block;padding:4px 0;cursor:grab;touch-action:none}',
       '.corncad-scroll.corncad-dragging{cursor:grabbing}',
@@ -297,6 +313,15 @@ window.__ModuleLoader__.load({
       var pickRef = useRef(null)
       var selectionRef = useRef([])
       var selectBoxRef = useRef(null)
+      // The DXF-space band of the last completed drag, so picks can carry the part
+      // of each entity that the user actually circled.
+      var bandRectRef = useRef(null)
+      // 'region' takes the part of an entity the band touches; 'entity' takes the
+      // whole entity. Both are legitimate: a detail edit wants the run, a
+      // "delete this line" wants the entity.
+      var modeState = useState('region')
+      var selectMode = modeState[0]
+      var setSelectMode = modeState[1]
       var selState = useState([])
       var selection = selState[0]
       var setSelection = selState[1]
@@ -544,10 +569,26 @@ window.__ModuleLoader__.load({
       /** Commit a selection set: state, highlight, and the host record. */
       var commitSelection = function (ids) {
         var index = pickRef.current || {}
+        // Only region mode clips: entity mode means the whole entity, so the record
+        // stays unclipped and the prompt describes it as a whole.
+        var band = selectMode === 'entity' ? null : bandRectRef.current
         var items = []
         for (var i = 0; i < ids.length; i++) {
           var meta = index[ids[i]]
-          if (meta !== undefined) items.push(meta)
+          if (meta === undefined) continue
+          if (band !== null) {
+            // The circled part, so the agent edits this run rather than the whole
+            // entity. Entities with no outline simply carry no `inBand`.
+            var inBand = clipToBand(meta, band)
+            if (inBand.length >= 4) {
+              var copy = {}
+              for (var key in meta) copy[key] = meta[key]
+              copy.inBand = inBand
+              items.push(copy)
+              continue
+            }
+          }
+          items.push(meta)
         }
         selectionRef.current = items
         setSelection(items)
@@ -672,13 +713,24 @@ window.__ModuleLoader__.load({
        * @returns {string} the prompt text.
        */
       var buildPrompt = function (items, instruction, recordPath) {
-        var ids = items.map(function (p) { return p.id + '(' + p.type + ')' }).slice(0, 20)
+        var ids = items.map(function (p) {
+          return p.id + '(' + p.type + (p.inBand !== undefined ? ', 仅框内部分)' : ')')
+        }).slice(0, 20)
         var lines = ['【图纸修改】文件：' + name]
         if (drawingPath !== '') lines.push('图纸路径：' + drawingPath)
         lines.push('框选修改内容：' + instruction)
         lines.push('选中 ' + items.length + ' 个图元：' + ids.join(', '))
         var bounds = describeSelection(items)
         if (bounds !== '') lines.push('范围（DXF 世界坐标）：' + bounds)
+        // Say plainly that the circled region is the subject, so a long entity is
+        // edited where it was grabbed rather than end to end.
+        var clipped = items.filter(function (p) { return p.inBand !== undefined })
+        if (clipped.length > 0) {
+          lines.push('框选模式：区域 —— 修改范围以框内部分为准（记录里的 inBand 是该段折线，' +
+            '坐标为 DXF 世界坐标）；未列 inBand 的图元按整体处理。')
+        } else {
+          lines.push('框选模式：图元 —— 下列图元整体参与修改。')
+        }
         if (recordPath !== '') lines.push('选中集已写入：' + recordPath)
         return lines.join('\n')
       }
@@ -884,10 +936,17 @@ window.__ModuleLoader__.load({
           var index = pickRef.current || {}
           if (rect !== null) {
             for (var key in index) {
-              if (coversBand(index[key], rect)) ids.push(key)
+              // Region mode takes anything the band crosses; entity mode keeps the
+              // stricter coverage rule so whole large entities are not dragged in.
+              var take = selectMode === 'entity' ? coversBand(index[key], rect) : touchesBand(index[key], rect)
+              if (take) ids.push(key)
             }
           }
         }
+        // Remember the band: the record and the prompt carry the clipped run, not
+        // just the entity, so "this bit" means this bit.
+        if (box.moved === true) bandRectRef.current = rectInDrawing(box.x, box.y, event.clientX, event.clientY)
+        else bandRectRef.current = null
         if (box.additive === true) {
           var current = selectionRef.current.map(function (p) { return p.id })
           for (var k = 0; k < ids.length; k++) if (current.indexOf(ids[k]) < 0) current.push(ids[k])
@@ -925,26 +984,160 @@ window.__ModuleLoader__.load({
        * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect band.
        * @returns {boolean}
        */
+      /**
+       * Does the band cover enough of this entity to take it whole?
+       *
+       * This is the "entity" mode: everything inside the band, or at least half of
+       * the outline, which keeps a full-sheet border out of a small selection.
+       * It is deliberately stricter than {@link touchesBand}.
+       *
+       * @param {{bbox:number[], pts?:number[]}} entity pick record.
+       * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect band.
+       * @returns {boolean}
+       */
       var coversBand = function (entity, rect) {
         var b = entity.bbox
         if (b === null || b === undefined) return false
-        // Fast reject: nothing to do when the boxes do not even touch.
         if (b[0] > rect.maxX || b[2] < rect.minX || b[1] > rect.maxY || b[3] < rect.minY) return false
-        var fullyInside = b[0] >= rect.minX && b[2] <= rect.maxX && b[1] >= rect.minY && b[3] <= rect.maxY
-        if (fullyInside) return true
+        if (b[0] >= rect.minX && b[2] <= rect.maxX && b[1] >= rect.minY && b[3] <= rect.maxY) return true
         var pts = entity.pts
         if (pts === undefined || pts.length < 4) {
-          // No outline available: fall back to "is the centre in the band".
           var midX = (b[0] + b[2]) / 2, midY = (b[1] + b[3]) / 2
           return midX >= rect.minX && midX <= rect.maxX && midY >= rect.minY && midY <= rect.maxY
         }
         var total = pts.length / 2
         var hit = 0
         for (var i = 0; i < pts.length; i += 2) {
-          var x = pts[i], y = pts[i + 1]
-          if (x >= rect.minX && x <= rect.maxX && y >= rect.minY && y <= rect.maxY) hit++
+          if (pts[i] >= rect.minX && pts[i] <= rect.maxX && pts[i + 1] >= rect.minY && pts[i + 1] <= rect.maxY) hit++
         }
         return hit / total >= 0.5
+      }
+
+      /**
+       * Does this entity pass through, or sit inside, the band?
+       *
+       * This is region semantics, not whole-entity semantics: a band that clips
+       * one segment of a full-width centre line takes that line. An earlier
+       * version required half of the outline to be covered, which made a line
+       * spanning the sheet impossible to grab by its middle — the opposite of what
+       * "circle this bit" means.
+       *
+       * Entities are approximated by their sampled outline (`pts`), which is what
+       * the host already returns; a point inside the band, a segment crossing it,
+       * or a vertex pair spanning it all count.
+       *
+       * @param {{bbox:number[], pts?:number[]}} entity pick record.
+       * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect band.
+       * @returns {boolean}
+       */
+      var touchesBand = function (entity, rect) {
+        var b = entity.bbox
+        if (b === null || b === undefined) return false
+        // Fast reject: the boxes do not even overlap.
+        if (b[0] > rect.maxX || b[2] < rect.minX || b[1] > rect.maxY || b[3] < rect.minY) return false
+        // Whole entity inside the band.
+        if (b[0] >= rect.minX && b[2] <= rect.maxX && b[1] >= rect.minY && b[3] <= rect.maxY) return true
+        var pts = entity.pts
+        if (pts === undefined || pts.length < 4) {
+          // No outline: accept on bbox overlap, which the reject above allowed.
+          return true
+        }
+        var inside = function (x, y) {
+          return x >= rect.minX && x <= rect.maxX && y >= rect.minY && y <= rect.maxY
+        }
+        for (var i = 0; i < pts.length; i += 2) {
+          if (inside(pts[i], pts[i + 1])) return true
+        }
+        // No vertex inside: a long segment can still cross the band corner to
+        // corner without either endpoint being inside, so test the edges too.
+        var count = pts.length / 2
+        for (var k = 0; k < count; k++) {
+          var j = (k + 1) % count
+          if (segmentHitsRect(pts[k * 2], pts[k * 2 + 1], pts[j * 2], pts[j * 2 + 1], rect)) return true
+        }
+        return false
+      }
+
+      /** Liang-Barsky: does the segment a->b intersect the axis-aligned rect? */
+      var segmentHitsRect = function (xa, ya, xb, yb, rect) {
+        var dx = xb - xa, dy = yb - ya
+        var t0 = 0, t1 = 1
+        var clip = function (p, q) {
+          if (p === 0) return q >= 0
+          var r = q / p
+          if (p < 0) {
+            if (r > t1) return false
+            if (r > t0) t0 = r
+          } else {
+            if (r < t0) return false
+            if (r < t1) t1 = r
+          }
+          return true
+        }
+        if (!clip(-dx, xa - rect.minX)) return false
+        if (!clip(dx, rect.maxX - xa)) return false
+        if (!clip(-dy, ya - rect.minY)) return false
+        if (!clip(dy, rect.maxY - ya)) return false
+        return t0 <= t1
+      }
+
+      /**
+       * The part of an entity that falls inside the band, as a polyline.
+       *
+       * The agent has to know *which bit* was circled. Sending the whole centre
+       * line when the user grabbed 10 mm of it is the difference between a usable
+       * instruction and a wrong edit, so the clipped run travels with the pick.
+       *
+       * @param {{pts?:number[]}} entity pick record.
+       * @param {{minX:number,minY:number,maxX:number,maxY:number}} rect band.
+       * @returns {number[]} flat [x0,y0,x1,y1,...] inside the band, or [].
+       */
+      var clipToBand = function (entity, rect) {
+        var pts = entity.pts
+        if (pts === undefined || pts.length < 4) return []
+        var out = []
+        var count = pts.length / 2
+        for (var k = 0; k < count; k++) {
+          var j = (k + 1) % count
+          // Clip every segment, including the ones whose endpoints both sit
+          // outside the band: a centre line crossing the band is exactly that
+          // case, and it is the case this feature exists for.
+          var run = clipSegment(pts[k * 2], pts[k * 2 + 1], pts[j * 2], pts[j * 2 + 1], rect)
+          if (run === null) continue
+          out.push(run[0], run[1], run[2], run[3])
+        }
+        // Collapse repeated points so the record stays readable.
+        var clean = []
+        for (var i = 0; i < out.length; i += 2) {
+          var n = clean.length
+          if (n >= 2 && Math.abs(clean[n - 2] - out[i]) < 1e-6 && Math.abs(clean[n - 1] - out[i + 1]) < 1e-6) continue
+          clean.push(out[i], out[i + 1])
+        }
+        return clean.length >= 2 ? clean : []
+      }
+
+      /** Liang-Barsky clip of one segment onto the rect; null when fully outside. */
+      var clipSegment = function (xa, ya, xb, yb, rect) {
+        var dx = xb - xa, dy = yb - ya
+        var t0 = 0, t1 = 1
+        var clip = function (p, q) {
+          if (p === 0) return q >= 0
+          var r = q / p
+          if (p < 0) {
+            if (r > t1) return false
+            if (r > t0) t0 = r
+          } else {
+            if (r < t0) return false
+            if (r < t1) t1 = r
+          }
+          return true
+        }
+        if (!clip(-dx, xa - rect.minX)) return null
+        if (!clip(dx, rect.maxX - xa)) return null
+        if (!clip(-dy, ya - rect.minY)) return null
+        if (!clip(dy, rect.maxY - ya)) return null
+        if (t0 > t1) return null
+        return [xa + t0 * dx, ya + t0 * dy, xa + t1 * dx, ya + t1 * dy]
       }
 
       var bar = h('div', { className: 'corncad-bar' },
@@ -960,6 +1153,24 @@ window.__ModuleLoader__.load({
           type: 'button', className: 'corncad-btn', title: t('fit'),
           onClick: function () { setZoom(0) },
         }, t('fit')),
+        // How a right-drag translates into a selection. Region takes the part of an
+        // entity the band touches (a run of a long line); Entity takes it whole.
+        h('div', {
+          className: 'corncad-seg', role: 'group',
+          'aria-label': t('modeLabel'), title: t('modeLabel'),
+        },
+          h('button', {
+            type: 'button',
+            'aria-pressed': selectMode === 'region' ? 'true' : 'false',
+            title: t('modeRegionTip'),
+            onClick: function () { setSelectMode('region') },
+          }, t('modeRegion')),
+          h('button', {
+            type: 'button',
+            'aria-pressed': selectMode === 'entity' ? 'true' : 'false',
+            title: t('modeEntityTip'),
+            onClick: function () { setSelectMode('entity') },
+          }, t('modeEntity'))),
         // Transient feedback (recorded / sent / failed). It used to be stored in
         // state but never rendered, so the user got no confirmation at all.
         notice === '' ? null : h('span', { className: 'corncad-notice' }, notice),
