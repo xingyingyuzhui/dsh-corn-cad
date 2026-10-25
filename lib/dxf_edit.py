@@ -395,8 +395,12 @@ def entity_points(entity):
         if kind == "LINE":
             start, end = entity.dxf.start, entity.dxf.end
             return [(start.x, start.y), (end.x, end.y)]
-        if kind in ("LWPOLYLINE", "POLYLINE") and entity.is_2d_polyline:
+        if kind == "LWPOLYLINE":
             return [(float(p[0]), float(p[1])) for p in entity.get_points("xy")]
+        if kind == "POLYLINE":
+            if not entity.is_2d_polyline:
+                return []
+            return [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in entity.vertices]
         if kind in ("TEXT", "MTEXT"):
             insert = entity.dxf.insert
             return [(insert.x, insert.y)]
@@ -535,6 +539,8 @@ def apply_edit(doc, edit):
     """Apply one edit. Returns a human-readable note, or raises ValueError."""
     handle = str(edit.get("handle") or "").strip()
     op = str(edit.get("op") or "").strip()
+    if op in DOCUMENT_OPS:
+        return apply_document_edit(doc, edit, op)
     if op == "":
         raise ValueError("edit is missing an op")
 
@@ -590,7 +596,7 @@ def apply_edit(doc, edit):
             entity.dxf.height = value
         else:
             entity.dxf.char_height = value
-        return f"{kind} {handle} height -> {value}"
+        return f"{kind} ({how}) height -> {value}"
 
     if op == "layer":
         entity.dxf.layer = str(edit["value"])
@@ -637,20 +643,348 @@ def apply_edit(doc, edit):
         dx = float(edit.get("dx", 0.0))
         dy = float(edit.get("dy", 0.0))
         entity.translate(dx, dy, 0)
-        return f"{kind} {handle} moved by ({dx}, {dy})"
+        return f"{kind} ({how}) moved by ({dx}, {dy})"
 
     if op == "center":
         if kind not in ("CIRCLE", "ARC"):
             raise ValueError(f"{kind} has no center")
         x, y = float(edit["x"]), float(edit["y"])
         entity.dxf.center = (x, y, 0)
-        return f"{kind} {handle} center -> ({x}, {y})"
+        return f"{kind} ({how}) center -> ({x}, {y})"
 
     if op == "delete":
         doc.modelspace().delete_entity(entity)
-        return f"{kind} {handle} deleted"
+        return f"{kind} ({how}) deleted"
+
+    if op == "linetype":
+        name = str(edit.get("value") or "").strip()
+        if name == "":
+            raise ValueError("linetype needs a value")
+        ensure_linetype(doc, name)
+        entity.dxf.linetype = name
+        return f"{kind} ({how}) linetype -> {name}"
+
+    if op == "lineweight":
+        value = int(edit["value"])
+        if value not in (-1, 0, 5, 9, 13, 15, 18, 20, 25, 30, 35, 40, 50, 53,
+                         60, 70, 80, 90, 100, 106, 120, 140, 158, 200, 211):
+            raise ValueError(f"{value} is not an AutoCAD lineweight (use -1 for BYLAYER)")
+        entity.dxf.lineweight = value
+        return f"{kind} ({how}) lineweight -> {value}"
+
+    if op == "scale":
+        # Scale about the entity's own centre unless a base point is given: asking
+        # to enlarge a hole means that hole grows in place, not that it flies away
+        # from the origin.
+        sx = float(edit.get("sx", edit.get("value", edit.get("factor", 1.0))))
+        sy = float(edit.get("sy", edit.get("value", edit.get("factor", sx))))
+        if sx == 0 or sy == 0:
+            raise ValueError("a scale factor of 0 collapses the entity")
+        base = edit.get("base")
+        if isinstance(base, (list, tuple)) and len(base) >= 2:
+            bx, by = float(base[0]), float(base[1])
+        else:
+            xs, ys = entity_bounds(entity)
+            if xs is None:
+                raise ValueError("cannot find the entity's centre; give a base point")
+            bx, by = (xs[0] + xs[1]) / 2.0, (ys[0] + ys[1]) / 2.0
+        entity.scale(sx, sy, 1.0)
+        # `scale` works about the world origin, so shift back around the base point.
+        entity.translate(bx * (1 - sx), by * (1 - sy), 0)
+        return f"{kind} ({how}) scaled by ({sx}, {sy}) about ({bx:.3f}, {by:.3f})"
+
+    if op == "rotate":
+        angle = float(edit.get("angle", edit.get("value", 0)))
+        base = edit.get("base")
+        if isinstance(base, (list, tuple)) and len(base) >= 2:
+            bx, by = float(base[0]), float(base[1])
+        else:
+            xs, ys = entity_bounds(entity)
+            if xs is None:
+                raise ValueError("cannot find the entity's centre; give a base point")
+            bx, by = (xs[0] + xs[1]) / 2.0, (ys[0] + ys[1]) / 2.0
+        entity.rotate_z(math.radians(angle))
+        # rotate_z turns about the world origin; move the result back about the base.
+        cos_a, sin_a = math.cos(math.radians(angle)), math.sin(math.radians(angle))
+        entity.translate(bx - (bx * cos_a - by * sin_a), by - (bx * sin_a + by * cos_a), 0)
+        return f"{kind} ({how}) rotated {angle}° about ({bx:.3f}, {by:.3f})"
+
+    if op == "mirror":
+        # Mirroring an entity across a line through its own centre is a no-op for a
+        # circle (and for a symmetric shape), so what the user means is usually a
+        # mirror across a *scene* axis. Default to the drawing's X axis (y = the
+        # entity's centre), and accept an explicit axis position.
+        axis = str(edit.get("axis") or "x").strip().lower()
+        xs, ys = entity_bounds(entity)
+        if xs is None:
+            raise ValueError("cannot find the entity's bounds")
+        cx, cy = (xs[0] + xs[1]) / 2.0, (ys[0] + ys[1]) / 2.0
+        if axis in ("x", "horizontal"):
+            py = float(edit.get("at", cy))
+            flip = (lambda x, y: (x, 2 * py - y))
+            return f"{kind} ({how}) " + mirror_geometry(entity, flip) + f" (axis y = {py:.3f})"
+        if axis in ("y", "vertical"):
+            px = float(edit.get("at", cx))
+            flip = (lambda x, y: (2 * px - x, y))
+            return f"{kind} ({how}) " + mirror_geometry(entity, flip) + f" (axis x = {px:.3f})"
+        raise ValueError('mirror axis must be "x" or "y" (the axis it flips across)')
+
+    if op == "copy":
+        count = int(edit.get("count", 1))
+        if count < 1 or count > 100:
+            raise ValueError("count must be between 1 and 100")
+        dx = float(edit.get("dx", 0.0))
+        dy = float(edit.get("dy", 0.0))
+        msp = doc.modelspace()
+        made = 0
+        for step in range(1, count + 1):
+            clone = entity.copy()
+            clone.translate(dx * step, dy * step, 0)
+            msp.add_entity(clone)
+            made += 1
+        return f"{kind} ({how}) copied {made}x with offset ({dx}, {dy}) per copy"
+
+    if op == "replace":
+        # Swap the entity for one of another type, keeping its place: layer, colour
+        # and whatever geometry the new type can express. "Make this arc a line"
+        # cannot be done by mutating the entity, so the replacement is explicit.
+        return replace_entity(doc, entity, edit, how)
 
     raise ValueError(f"unknown op {op!r}")
+
+
+# The linetypes worth offering by name; AUTO-CAD's standard library rather than a
+# numeric lookup, so "dashed" means the same thing in every drawing.
+LINETYPE_PATTERNS = {
+    "CONTINUOUS": [],
+    "DASHED": [0.5, -0.25],
+    "DOT": [0.0, -0.25],
+    "DASHDOT": [0.5, -0.25, 0.0, -0.25],
+    "CENTER": [1.25, -0.25, 0.25, -0.25],
+    "PHANTOM": [1.25, -0.25, 0.25, -0.25, 0.25, -0.25],
+    "HIDDEN": [0.25, -0.125],
+    "BORDER": [0.5, -0.25, 0.5, -0.25],
+}
+
+
+def ensure_linetype(doc, name):
+    """Add a linetype definition when the drawing does not already carry it."""
+    upper = name.upper()
+    if doc.linetypes.has_entry(upper):
+        return True
+    pattern = LINETYPE_PATTERNS.get(upper)
+    if pattern is None:
+        return False
+    doc.linetypes.add(upper, pattern=pattern, description=f"Corn CAD {upper}")
+    return True
+
+
+def ensure_layer(doc, name, color=7):
+    """Add a layer when missing. Returns True when it had to be created."""
+    if doc.layers.has_entry(name):
+        return False
+    doc.layers.add(name, color=color)
+    return True
+
+
+def entity_bounds(entity):
+    """World-space (xs, ys) extent tuples, or (None, None) when unknown."""
+    points = entity_points(entity)
+    if not points:
+        return None, None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return (min(xs), max(xs)), (min(ys), max(ys))
+
+
+# Operations that change the drawing rather than one entity. They take no handle.
+DOCUMENT_OPS = {"add_layer", "layer_visible", "layer_color", "add_linetype", "purge_layer"}
+
+
+def apply_document_edit(doc, edit, op):
+    """Layer/linetype management, which is document-scoped, not entity-scoped."""
+    if op == "add_layer":
+        name = str(edit.get("name") or "").strip()
+        if name == "":
+            raise ValueError("add_layer needs a name")
+        color = int(edit.get("color", 7))
+        created = ensure_layer(doc, name, color)
+        return f"layer {name} {'created' if created else 'already exists'}"
+
+    if op == "layer_visible":
+        name = str(edit.get("name") or "").strip()
+        layer = doc.layers.get(name) if name else None
+        if layer is None:
+            raise ValueError(f"no layer named {name!r}")
+        visible = bool(edit.get("value", True))
+        # DXF stores visibility as the SIGN of the layer colour: a negative index is
+        # an off layer. ezdxf's `.off` setter looks like it does this but does not
+        # persist (is_off() still reports False after assigning), so the sign is
+        # the only representation that survives a round trip.
+        magnitude = abs(layer.dxf.color) or 7
+        if magnitude in (0, 256):
+            magnitude = 7
+        layer.dxf.color = magnitude if visible else -magnitude
+        return f"layer {name} {'shown' if visible else 'hidden'}"
+
+    if op == "layer_color":
+        name = str(edit.get("name") or "").strip()
+        layer = doc.layers.get(name) if name else None
+        if layer is None:
+            raise ValueError(f"no layer named {name!r}")
+        resolved = color_index(edit.get("value", 7))
+        if resolved is None or resolved[0] != "index":
+            raise ValueError("a layer colour must be an AutoCAD index or a colour name")
+        index = resolved[1]
+        if index in (0, 256):
+            raise ValueError("a layer needs a concrete colour, not BYBLOCK/BYLAYER")
+        # Keep the hidden state: a negative colour means the layer is off.
+        layer.dxf.color = -index if layer.is_off() else index
+        return f"layer {name} colour -> index {index}"
+
+    if op == "add_linetype":
+        name = str(edit.get("name") or "").strip()
+        if name == "":
+            raise ValueError("add_linetype needs a name")
+        if name.upper() not in LINETYPE_PATTERNS:
+            raise ValueError(f"unknown linetype {name!r}; known: {sorted(LINETYPE_PATTERNS)}")
+        created = ensure_linetype(doc, name)
+        return f"linetype {name} {'added' if created else 'already exists'}"
+
+    if op == "purge_layer":
+        name = str(edit.get("name") or "").strip()
+        layer = doc.layers.get(name) if name else None
+        if layer is None:
+            raise ValueError(f"no layer named {name!r}")
+        used = [e for e in doc.modelspace() if e.dxf.layer == name]
+        if used:
+            raise ValueError(f"layer {name!r} still holds {len(used)} entities; move them first")
+        doc.layers.remove(name)
+        return f"layer {name} removed"
+
+    raise ValueError(f"unknown document op {op!r}")
+
+
+def _arc_endpoints(entity):
+    """World-space endpoints of an arc or circle, in sweep order."""
+    center = entity.dxf.center
+    radius = float(entity.dxf.radius)
+    if entity.dxftype() == "CIRCLE":
+        return (center.x + radius, center.y), (center.x - radius, center.y)
+    start = float(entity.dxf.start_angle)
+    end = float(entity.dxf.end_angle)
+    return (
+        (center.x + radius * math.cos(math.radians(start)), center.y + radius * math.sin(math.radians(start))),
+        (center.x + radius * math.cos(math.radians(end)), center.y + radius * math.sin(math.radians(end))),
+    )
+
+
+def _polyline_points(entity):
+    if entity.dxftype() == "LWPOLYLINE":
+        return [(float(point[0]), float(point[1])) for point in entity.get_points("xy")]
+    return [(float(vertex.dxf.location.x), float(vertex.dxf.location.y)) for vertex in entity.vertices]
+
+
+def mirror_geometry(entity, flip):
+    """Move an entity through an arbitrary reflection, by rewriting its geometry.
+
+    ezdxf's own transforms cannot be trusted here: `scale(1, -1, 1)` on a circle
+    also negates its centre x, and a mirror matrix does the same, so a plain
+    y-reflection walks the entity sideways. Rewriting the points is exact and
+    leaves no such surprise.
+    """
+    kind = entity.dxftype()
+    if kind in ("CIRCLE", "ARC"):
+        cx, cy = entity.dxf.center.x, entity.dxf.center.y
+        nx, ny = flip(cx, cy)
+        if kind == "ARC":
+            # A reflection reverses the sweep, so swap the angles it runs between.
+            a0, a1 = float(entity.dxf.start_angle), float(entity.dxf.end_angle)
+            if (nx - cx) * (ny - cy) != 0 and (abs(nx - cx) > 1e-9) != (abs(ny - cy) > 1e-9):
+                entity.dxf.start_angle, entity.dxf.end_angle = a1, a0
+        entity.dxf.center = (nx, ny, entity.dxf.center.z)
+        return "mirrored"
+    if kind == "LINE":
+        start, end = entity.dxf.start, entity.dxf.end
+        entity.dxf.start = (*flip(start.x, start.y), start.z)
+        entity.dxf.end = (*flip(end.x, end.y), end.z)
+        return "mirrored"
+    if kind == "LWPOLYLINE":
+        moved = [flip(float(x), float(y)) for x, y in entity.get_points("xy")]
+        entity.set_points(moved, format="xy")
+        return "mirrored"
+    if kind == "POLYLINE":
+        for vertex in entity.vertices:
+            location = vertex.dxf.location
+            vertex.dxf.location = (*flip(location.x, location.y), location.z)
+        return "mirrored"
+    if kind in ("TEXT", "MTEXT"):
+        insert = entity.dxf.insert
+        entity.dxf.insert = (*flip(insert.x, insert.y), insert.z)
+        return "moved"
+    if kind == "POINT":
+        location = entity.dxf.location
+        entity.dxf.location = (*flip(location.x, location.y), location.z)
+        return "moved"
+    raise ValueError(f"mirroring {kind} is not supported")
+
+
+def replace_entity(doc, entity, edit, how):
+    """Replace an entity with another type at the same place.
+
+    A conversion that would lose meaning (anything into an ARC without a sweep) is
+    refused rather than guessed: silently changing a drawing is worse than saying
+    what is supported.
+    """
+    source = entity.dxftype()
+    target = str(edit.get("to") or "").strip().upper()
+    if target == "":
+        raise ValueError('replace needs a "to" type, for example {"op":"replace","to":"LINE"}')
+    if source == target:
+        raise ValueError(f"{source} is already {target}")
+
+    msp = doc.modelspace()
+    attribs = {"layer": entity.dxf.layer}
+    for name in ("color", "linetype"):
+        try:
+            if entity.dxf.hasattr(name):
+                attribs[name] = entity.dxf.get(name)
+        except Exception:
+            pass
+
+    created = None
+    if source in ("ARC", "CIRCLE") and target in ("LINE", "LWPOLYLINE"):
+        start, end = _arc_endpoints(entity)
+        created = (msp.add_line(start, end, dxfattribs=attribs) if target == "LINE"
+                   else msp.add_lwpolyline([start, end], dxfattribs=attribs))
+    elif source in ("LINE", "LWPOLYLINE") and target in ("LINE", "LWPOLYLINE"):
+        points = (_polyline_points(entity) if source == "LWPOLYLINE" else
+                  [(entity.dxf.start.x, entity.dxf.start.y), (entity.dxf.end.x, entity.dxf.end.y)])
+        if len(points) != 2:
+            raise ValueError(f"{source} has {len(points)} points; only a 2-point entity becomes one {target}")
+        created = (msp.add_line(points[0], points[1], dxfattribs=attribs) if target == "LINE"
+                   else msp.add_lwpolyline(points, dxfattribs=attribs))
+    elif source == "LINE" and target == "CIRCLE":
+        start, end = entity.dxf.start, entity.dxf.end
+        radius = start.distance(end) / 2.0
+        if radius <= 0:
+            raise ValueError("a zero-length line has no circle")
+        created = msp.add_circle(((start.x + end.x) / 2.0, (start.y + end.y) / 2.0), radius, dxfattribs=attribs)
+    elif target == "ARC":
+        raise ValueError(f"{source} -> ARC needs a sweep; add the arc explicitly instead")
+
+    if created is None:
+        raise ValueError(f"cannot convert {source} to {target}")
+
+    # True colour lives outside dxfattribs, so it has to be copied separately.
+    try:
+        if entity.dxf.hasattr("true_color"):
+            created.dxf.true_color = entity.dxf.true_color
+    except Exception:
+        pass
+
+    msp.delete_entity(entity)
+    return f"{source} ({how}) replaced by {target}"
 
 
 def backup_path(path):

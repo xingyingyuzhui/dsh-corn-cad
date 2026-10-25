@@ -22,3 +22,4 @@ desktop.ini
 # Python bytecode from the DXF editor (it runs as a subprocess).
 __pycache__/
 *.pyc
+.bak

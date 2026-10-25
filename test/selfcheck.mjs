@@ -266,7 +266,7 @@ await check('nested geometry far outside the sheet is dropped and counted, not d
   assert.doesNotMatch(rendered.svg, /9000/, 'the dropped geometry never reaches the document')
 })
 
-await check('layer colours follow the ACI table, the colour sign is ignored, frozen layers are dropped', () => {
+await check('layer colours follow the ACI table, and a discriminating sign means off', () => {
   // libredwg writes every layer colour negated, so NEG (-2) must draw like 2
   // rather than being read as "layer off" - that is the documented trade-off.
   const dxf = [
@@ -285,10 +285,42 @@ await check('layer colours follow the ACI table, the colour sign is ignored, fro
   ].join('\n')
   const rendered = dxfToSvg(dxf, RENDER_OPTIONS)
   assert.match(rendered.svg, /stroke="#ff0000"/, 'layer colour 1 is red')
-  assert.match(rendered.svg, /stroke="#ffff00"/, 'a negated layer colour draws with its magnitude')
   assert.match(rendered.svg, /stroke="#00ffff"/, 'an entity colour overrides its layer')
-  assert.equal(count(rendered.svg, /<path /g), 3, 'the frozen layer is skipped')
-  assert.equal(rendered.stats.LINE, 4, 'but it is still tallied')
+  // RED is positive and NEG negative, so the signs discriminate: NEG is off.
+  assert.equal(count(rendered.svg, /<path /g), 2, 'the frozen and the off layer are skipped')
+  assert.equal(rendered.stats.LINE, 4, 'but every line is still tallied')
+
+  // Where EVERY layer is negated the sign cannot mean anything — libredwg does
+  // this to every colour it writes, and honouring it would blank the drawing.
+  const allNegated = [
+    '0', 'SECTION', '2', 'TABLES', '0', 'TABLE', '2', 'LAYER', '70', '2',
+    '0', 'LAYER', '2', 'A', '70', '0', '62', '-1', '6', 'CONTINUOUS',
+    '0', 'LAYER', '2', 'B', '70', '0', '62', '-2', '6', 'CONTINUOUS',
+    '0', 'ENDTAB', '0', 'ENDSEC',
+    '0', 'SECTION', '2', 'ENTITIES',
+    '0', 'LINE', '8', 'A', '10', '0', '20', '0', '11', '10', '21', '10',
+    '0', 'LINE', '8', 'B', '10', '0', '20', '0', '11', '10', '21', '10',
+    '0', 'ENDSEC', '0', 'EOF', '',
+  ].join('\n')
+  const quirk = dxfToSvg(allNegated, RENDER_OPTIONS)
+  assert.equal(count(quirk.svg, /<path /g), 2,
+    'a file with every layer negated keeps drawing: the sign is a converter quirk')
+
+  // The sign is only trusted when it discriminates. Here RED is positive and NEG
+  // negative, so NEG really is an off layer and must disappear.
+  const mixed = [
+    '0', 'SECTION', '2', 'TABLES', '0', 'TABLE', '2', 'LAYER', '70', '2',
+    '0', 'LAYER', '2', 'ON', '70', '0', '62', '1', '6', 'CONTINUOUS',
+    '0', 'LAYER', '2', 'OFF', '70', '0', '62', '-2', '6', 'CONTINUOUS',
+    '0', 'ENDTAB', '0', 'ENDSEC',
+    '0', 'SECTION', '2', 'ENTITIES',
+    '0', 'LINE', '8', 'ON', '10', '0', '20', '0', '11', '10', '21', '10',
+    '0', 'LINE', '8', 'OFF', '10', '0', '20', '0', '11', '10', '21', '10',
+    '0', 'ENDSEC', '0', 'EOF', '',
+  ].join('\n')
+  const mixedRender = dxfToSvg(mixed, RENDER_OPTIONS)
+  assert.equal(count(mixedRender.svg, /<path /g), 1,
+    'when signs discriminate, a negative layer colour is an off layer')
 })
 
 await check('text is XML-escaped, and a drawing with no geometry is refused', () => {
@@ -1461,6 +1493,44 @@ await check('the editor fixes a lying code page so the renderer reads Chinese', 
   }
 })
 
+await check('every advertised edit operation is implemented by the editor', () => {
+  // The tool schema and the Python helper are two files that must agree. A name in
+  // the enum with no branch behind it fails only at run time, in front of the user.
+  const text = readFileSync(join(PACKAGE_ROOT, 'lib', 'dxf_edit.py'), 'utf8')
+  const entityOps = [
+    'radius', 'text', 'mtext', 'height', 'layer', 'color', 'linetype', 'lineweight',
+    'move', 'center', 'scale', 'rotate', 'mirror', 'copy', 'delete', 'replace',
+  ]
+  for (const op of entityOps) {
+    assert.ok(text.includes(`op == "${op}"`), `the editor implements ${op}`)
+  }
+  const documentOps = ['add_layer', 'layer_visible', 'layer_color', 'add_linetype', 'purge_layer']
+  for (const op of documentOps) {
+    assert.ok(text.includes(`"${op}"`), `the editor implements the document op ${op}`)
+  }
+  assert.ok(text.includes('DOCUMENT_OPS'), 'document ops are dispatched before entity lookup')
+
+  // And the schema must advertise the same set, or the model cannot reach them.
+  const schema = readFileSync(join(PACKAGE_ROOT, 'index.js'), 'utf8')
+  for (const op of [...entityOps, ...documentOps]) {
+    assert.ok(schema.includes(`'${op}'`), `the tool schema offers ${op}`)
+  }
+})
+
+await check('transforms move geometry the way the numbers say', () => {
+  const text = readFileSync(join(PACKAGE_ROOT, 'lib', 'dxf_edit.py'), 'utf8')
+  // scale/rotate work about the world origin in ezdxf, so the base point has to be
+  // restored; without that a scale about the centre throws the entity across the
+  // drawing.
+  assert.ok(text.includes('bx * (1 - sx)'), 'scale corrects for the origin-based transform')
+  assert.ok(text.includes('mirror_geometry'), 'mirror rewrites points instead of using a matrix')
+  // ezdxf's own mirror transforms negate the wrong axis on circles, which is why
+  // the reflection is applied to the entity's own coordinates.
+  assert.ok(text.includes('def mirror_geometry'), 'mirror has its own implementation')
+  assert.ok(text.includes('2 * py - y') || text.includes('2 * py'), 'a y-reflection is y -> 2a - y')
+  assert.ok(text.includes('2 * px - x') || text.includes('2 * px'), 'an x-reflection is x -> 2a - x')
+})
+
 await check('a named colour resolves to the index AutoCAD uses', () => {
   // "改成黑色" has to mean something to a DXF writer. Index 7 is the standard
   // black-on-white value; a #RRGGBB request becomes a true colour instead.
@@ -1610,7 +1680,9 @@ await check('package.json is the bundle manifest the repo kit requires', () => {
 await check('every file in the tree is covered by package.json files', () => {
   const always = new Set(['package.json', '.gitignore'])
   // Bytecode left by running the Python editor is a runtime dropping, not a file.
-  const ignored = (file) => file.includes('__pycache__') || file.endsWith('.pyc') || file.includes('/.corncad/')
+  // Runtime droppings: bytecode, the editor's timestamped backups, selection records.
+  const ignored = (file) => file.includes('__pycache__') || file.endsWith('.pyc') ||
+    file.endsWith('.bak') || file.includes('/.corncad/')
   const patterns = manifest.files
   /**
    * npm packlist globbing: `*` matches inside one path segment, `**` spans any

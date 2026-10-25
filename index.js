@@ -599,8 +599,12 @@ export function apply(ctx, config = {}) {
       description:
         'Read or edit the DXF drawing open in the Corn CAD sidebar preview. ' +
         'Call with describe:true first to list entities and their handles, then send edits ' +
-        'addressed by handle. Every applied edit keeps a timestamped .bak next to the file, ' +
-        'and the sidebar refreshes itself because the document preview watches the file. ' +
+        'addressed by handle (or by pick {type, layer, bbox} when the file has no handles). ' +
+        'Supports attributes (radius, text, color, layer, linetype, lineweight, height), ' +
+        'geometry (move, center, scale, rotate, mirror, copy, delete, replace) and ' +
+        'document structure (add_layer, layer_visible, layer_color, add_linetype, purge_layer). ' +
+        'Every applied edit keeps a timestamped .bak next to the file, and the sidebar ' +
+        'refreshes itself because the document preview watches the file. ' +
         'Only .dxf is editable; .dwg must be exported to DXF first.',
       parameters: {
         type: 'object',
@@ -615,18 +619,38 @@ export function apply(ctx, config = {}) {
             items: {
               type: 'object',
               properties: {
-                handle: { type: 'string', description: 'Entity handle from describe.' },
+                handle: { type: 'string', description: 'Entity handle from describe. Omit for document ops (add_layer, layer_visible, layer_color, add_linetype, purge_layer).' },
+                pick: {
+                  type: 'object',
+                  description: 'When the drawing has no handles, name the entity by what the preview reported: {type, layer, bbox}.',
+                },
                 op: {
                   type: 'string',
-                  enum: ['radius', 'text', 'mtext', 'height', 'layer', 'color', 'move', 'center', 'delete'],
+                  enum: [
+                    'radius', 'text', 'mtext', 'height', 'layer', 'color', 'linetype', 'lineweight',
+                    'move', 'center', 'scale', 'rotate', 'mirror', 'copy', 'delete', 'replace',
+                    'add_layer', 'layer_visible', 'layer_color', 'add_linetype', 'purge_layer',
+                  ],
+                  description:
+                    'Entity ops need a handle or pick. Document ops (add_layer, layer_visible, ' +
+                    'layer_color, add_linetype, purge_layer) act on the drawing and take no handle.',
                 },
-                value: { description: 'New value for radius / text / mtext / height / layer / color.' },
-                dx: { type: 'number', description: 'move: X delta.' },
-                dy: { type: 'number', description: 'move: Y delta.' },
+                value: { description: 'radius / text / mtext / height / layer / color / linetype / lineweight / scale factor / layer_visible boolean.' },
+                to: { type: 'string', description: 'replace: the target entity type, e.g. LINE.' },
+                angle: { type: 'number', description: 'rotate: degrees, clockwise positive.' },
+                axis: { type: 'string', enum: ['x', 'y'], description: 'mirror: the axis to flip across.' },
+                at: { type: 'number', description: 'mirror: the axis position; defaults to the entity centre.' },
+                base: { type: 'array', items: { type: 'number' }, description: 'scale/rotate: base point [x, y]; defaults to the entity centre.' },
+                sx: { type: 'number', description: 'scale: X factor.' },
+                sy: { type: 'number', description: 'scale: Y factor.' },
+                count: { type: 'number', description: 'copy: how many copies (1-100).' },
+                name: { type: 'string', description: 'Document ops: the layer or linetype name.' },
+                dx: { type: 'number', description: 'move/copy: X delta.' },
+                dy: { type: 'number', description: 'move/copy: Y delta.' },
                 x: { type: 'number', description: 'center: new X.' },
                 y: { type: 'number', description: 'center: new Y.' },
               },
-              required: ['handle', 'op'],
+              required: ['op'],
             },
           },
         },
