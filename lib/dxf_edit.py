@@ -481,17 +481,19 @@ COLOR_NAMES = {
 
 
 def color_index(value):
-    """Resolve a colour request to an AutoCAD index (int) or an RGB int (0xRRGGBB)."""
+    """Resolve a colour request to ("index", n) or ("rgb", 0xRRGGBB), or None.
+
+    The two kinds must not be conflated: 16746496 is a valid RGB value and an
+    impossible AutoCAD colour index, so a bare int has to say which it is. An
+    explicit "#..." is RGB; a plain number or a name is an index.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value if 0 <= value <= 255 else None
+        return ("index", value) if 0 <= value <= 255 else None
     text = str(value).strip().lower()
     if text == "":
         return None
-    if text.isdigit():
-        number = int(text)
-        return number if 0 <= number <= 255 else None
     if text.startswith("#"):
         digits = text[1:]
         if len(digits) == 3:
@@ -499,12 +501,34 @@ def color_index(value):
         if len(digits) != 6:
             return None
         try:
-            return int(digits, 16)
+            return ("rgb", int(digits, 16))
         except ValueError:
             return None
+    if text.isdigit():
+        number = int(text)
+        return ("index", number) if 0 <= number <= 255 else None
     if text in COLOR_NAMES:
-        return COLOR_NAMES[text]
+        return ("index", COLOR_NAMES[text])
     return None
+
+
+# The standard AutoCAD palette, indexed 1..9 plus the ones people actually name.
+# Used only to approximate a true colour on a DXF too old to store one.
+PALETTE = {
+    1: (255, 0, 0), 2: (255, 255, 0), 3: (0, 255, 0), 4: (0, 255, 255),
+    5: (0, 0, 255), 6: (255, 0, 255), 7: (0, 0, 0), 8: (128, 128, 128),
+    9: (192, 192, 192), 30: (255, 127, 0), 32: (127, 63, 0), 200: (128, 0, 128),
+}
+
+
+def nearest_color_index(r, g, b):
+    """Closest palette entry to an RGB triple, by squared distance."""
+    best, best_distance = 7, None
+    for index, (pr, pg, pb) in PALETTE.items():
+        distance = (pr - r) ** 2 + (pg - g) ** 2 + (pb - b) ** 2
+        if best_distance is None or distance < best_distance:
+            best, best_distance = index, distance
+    return best
 
 
 def apply_edit(doc, edit):
@@ -573,11 +597,16 @@ def apply_edit(doc, edit):
         return f"{kind} ({how}) layer -> {edit['value']}"
 
     if op == "color":
-        value = edit["value"]
-        target = color_index(value)
-        if target is None:
-            raise ValueError(f"unknown color {value!r}; give an AutoCAD color index (1-255) or a #RRGGBB value")
-        if isinstance(target, int):
+        resolved = color_index(edit["value"])
+        if resolved is None:
+            raise ValueError(
+                f"unknown color {edit['value']!r}; give a name, an AutoCAD index (1-255), or #RRGGBB")
+        mode, target = resolved
+        if mode == "index":
+            # BYLAYER (256) or BYBLOCK (0) would hide the change, so refuse them:
+            # the user asked for a colour, not for a layer lookup.
+            if target in (0, 256):
+                raise ValueError("0 and 256 mean BYBLOCK/BYLAYER, not a colour")
             entity.dxf.color = target
             # A true colour left behind would win over the index, so clear it.
             try:
@@ -586,7 +615,22 @@ def apply_edit(doc, edit):
             except Exception:
                 pass
             return f"{kind} ({how}) color -> AutoCAD index {target}"
+        # True colour needs DXF R2004+ (group code 420). Older files silently drop
+        # it, which would look like the edit did nothing, so fall back to the
+        # nearest AutoCAD index and say so.
+        if doc.dxfversion is not None and doc.dxfversion < "AC1018":
+            rgb = ((target >> 16) & 0xFF, (target >> 8) & 0xFF, target & 0xFF)
+            nearest = nearest_color_index(*rgb)
+            entity.dxf.color = nearest
+            return (f"{kind} ({how}) color -> AutoCAD index {nearest} "
+                    f"(nearest to #{target:06X}; this DXF version cannot store true colour)")
         entity.dxf.true_color = target
+        # The index has to stop overriding the true colour.
+        try:
+            if entity.dxf.hasattr("color"):
+                del entity.dxf.color
+        except Exception:
+            pass
         return f"{kind} ({how}) color -> #{target:06X}"
 
     if op == "move":

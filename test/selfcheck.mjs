@@ -1469,6 +1469,14 @@ await check('a named colour resolves to the index AutoCAD uses', () => {
   assert.ok(text.includes('"red": 1'), 'red maps to index 1')
   assert.ok(text.includes('def color_index'), 'one resolver handles name, index and hex')
   assert.ok(text.includes('true_color'), 'a hex request becomes a true colour')
+  // 16746496 is a plausible RGB value and an impossible colour index; the two
+  // kinds must stay distinguishable or a hex request silently becomes index 5.
+  assert.ok(text.includes('("index",'), 'an index is tagged as an index')
+  assert.ok(text.includes('("rgb",'), 'a hex value is tagged as rgb')
+  // True colour needs group code 420, which R2000 cannot store. Without this
+  // fallback the edit writes nothing and looks like it did nothing.
+  assert.ok(text.includes('AC1018'), 'pre-R2004 files fall back to an index')
+  assert.ok(text.includes('nearest_color_index'), 'and get the closest palette entry')
 })
 
 await check('an arc pick carries the arc bounds, not its full circle', () => {
