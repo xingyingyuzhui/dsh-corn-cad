@@ -149,8 +149,157 @@ def read_document(path):
         if score[0] == 0:
             break
     if best is None:
+        # Every strict parse failed. Hand-written or third-party DXF often omits the
+        # `AcDbPolyline`-style subclass markers that a strict reader requires, while
+        # the geometry itself is perfectly usable. Try the lenient loader before
+        # giving up, and let the caller say so in its report.
+        lenient = read_lenient(path)
+        if lenient is not None:
+            # Mark it so the report can say the file needed structural repair.
+            try:
+                lenient._corncad_repaired = True
+            except Exception:
+                pass
+            return lenient, page, version
         raise ValueError("could not read the drawing under any known code page")
     return best, page, version
+
+
+# Subclass markers a strict reader requires, keyed by entity type. Hand-written or
+# thin-exported DXF often omits them while the geometry is perfectly valid; ezdxf
+# then refuses the whole file with "missing 'AcDbPolyline' subclass". Repairing the
+# tags is safe because the markers carry no geometry — only the class hierarchy.
+SUBCLASS_OF = {
+    "LWPOLYLINE": "AcDbPolyline",
+    "POLYLINE": "AcDb2dPolyline",
+    "MTEXT": "AcDbMText",
+    "TEXT": "AcDbText",
+    "CIRCLE": "AcDbCircle",
+    "ARC": "AcDbCircle",
+    "LINE": "AcDbLine",
+    "ELLIPSE": "AcDbEllipse",
+    "POINT": "AcDbPoint",
+    "SOLID": "AcDbTrace",
+    "INSERT": "AcDbBlockReference",
+    "HATCH": "AcDbHatch",
+    "DIMENSION": "AcDbDimension",
+    "3DFACE": "AcDbFace",
+}
+
+# Types that also need a second marker for their geometry.
+SUBCLASS_EXTRA = {
+    "LWPOLYLINE": "AcDbPolyline",
+    "CIRCLE": "AcDbCircle",
+    "ARC": "AcDbCircle",
+    "TEXT": "AcDbText",
+    "MTEXT": "AcDbMText",
+}
+
+
+def normalise_tags(text):
+    """Insert entity subclass markers that a strict reader requires.
+
+    Works on the raw tag stream, before ezdxf binds anything, so a file that only
+    lacks structure can still be read. A file that already carries markers is
+    returned unchanged.
+    """
+    lines = text.splitlines()
+    # Pair up (code, value) the way DXF stores them.
+    pairs = []
+    index = 0
+    while index + 1 < len(lines):
+        raw_code = lines[index].strip()
+        if raw_code == "":
+            index += 1
+            continue
+        try:
+            code = int(raw_code)
+        except ValueError:
+            index += 1
+            continue
+        pairs.append((code, lines[index + 1]))
+        index += 2
+
+    out = []
+    index = 0
+    while index < len(pairs):
+        code, value = pairs[index]
+        out.append((code, value))
+        if code == 0:
+            kind = value.strip().upper()
+            # Collect the entity body so we know whether a marker is present.
+            look = index + 1
+            has_100 = False
+            has_layer = False
+            while look < len(pairs) and pairs[look][0] != 0:
+                if pairs[look][0] == 100:
+                    has_100 = True
+                if pairs[look][0] == 8:
+                    has_layer = True
+                look += 1
+            target = SUBCLASS_OF.get(kind)
+            if target is not None and not has_100:
+                out.append((100, "AcDbEntity"))
+                if not has_layer:
+                    out.append((8, "0"))
+                out.append((100, target))
+            elif target is not None and has_100:
+                # A partial marker set still needs the entity-level one first.
+                body = [pairs[i] for i in range(index + 1, look)]
+                if not any(c == 100 and v.strip() == "AcDbEntity" for c, v in body):
+                    out.append((100, "AcDbEntity"))
+                    if not has_layer:
+                        out.append((8, "0"))
+        index += 1
+
+    flat = []
+    for code, value in out:
+        flat.append(str(code))
+        flat.append(value)
+    return "\n".join(flat) + "\n"
+
+
+def read_lenient(path):
+    """Read a file a strict parser rejects, by repairing its structure first.
+
+    The repair rewrites tags, so it has to decode with the file's *real* encoding
+    and hand the same encoding back when writing — decoding GBK as UTF-8 smuggles
+    surrogate escapes into the text, which then cannot even be serialised back to
+    JSON.
+    """
+    page, version = declared_codepage(path)
+    declared = CODEPAGES.get(page or "", "utf-8")
+    # Most likely first: the declared page, then UTF-8 (R2007+ spec), then GBK
+    # (the page a Chinese drawing most often actually uses).
+    attempts = []
+    for codec in (declared, "utf-8", "gbk", "big5"):
+        if codec and codec not in attempts:
+            attempts.append(codec)
+
+    for codec in attempts:
+        try:
+            raw = open(path, "rb").read().decode(codec)
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if any(0xDC80 <= ord(char) <= 0xDCFF for char in raw):
+            continue  # surrogate escapes: this codec was wrong
+        repaired = normalise_tags(raw)
+        handle = tempfile.NamedTemporaryFile("w", suffix=".dxf", delete=False, encoding=codec)
+        try:
+            handle.write(repaired)
+            handle.close()
+            doc = ezdxf.readfile(handle.name, encoding=codec)
+            return doc
+        except Exception:
+            continue
+        finally:
+            try:
+                if not handle.closed:
+                    handle.close()
+                os.unlink(handle.name)
+            except OSError:
+                pass
+    return None
 
 
 def describe(doc):
@@ -324,6 +473,7 @@ def main(argv=None):
             "codepage": page,
             "version": f"AC{version}" if version else None,
             "encoding": doc.encoding,
+            "repaired": bool(getattr(doc, "_corncad_repaired", False)),
             "entities": describe(doc),
         }, ensure_ascii=False))
         return 0
@@ -368,7 +518,16 @@ def main(argv=None):
     except Exception as error:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
-        print(json.dumps({"ok": False, "code": "WRITE_FAILED", "message": str(error)}, ensure_ascii=False))
+        message = str(error)
+        # The most common write failure by far: a handle-less R12 file. ezdxf can
+        # read such a file (after repair) but cannot assign identities on save, and
+        # the bare ezdxf message does not tell the user what to do about it.
+        if "needs a handle" in message or "handle" in message.lower() and "R12" in message:
+            message = (
+                "这份 DXF 是没有句柄的旧式 R12 结构，能读不能写。"
+                "请在 CAD 里另存为 R2000 或更新的版本（AutoCAD: 另存为 → AutoCAD 2000/LT2000 Drawing），再试一次。"
+            )
+        print(json.dumps({"ok": False, "code": "WRITE_FAILED", "message": message}, ensure_ascii=False))
         return 1
 
     print(json.dumps({

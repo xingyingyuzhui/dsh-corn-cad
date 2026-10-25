@@ -1461,6 +1461,18 @@ await check('the editor fixes a lying code page so the renderer reads Chinese', 
   }
 })
 
+await check('the editor repairs a drawing that omits subclass markers', () => {
+  const script = join(PACKAGE_ROOT, 'lib', 'dxf_edit.py')
+  const text = readFileSync(script, 'utf8')
+  // Two failure modes seen on real files: a thin exporter drops the `AcDbPolyline`
+  // markers a strict reader requires, and a pre-R2000 file has no handles at all.
+  assert.ok(text.includes('SUBCLASS_OF'), 'the editor knows the required subclass markers')
+  assert.ok(text.includes('def normalise_tags'), 'and can insert them before parsing')
+  assert.ok(text.includes('def read_lenient'), 'with a lenient read behind the strict one')
+  assert.ok(text.includes('_corncad_repaired'), 'repairing a file is reported, not hidden')
+  assert.ok(text.includes('没有句柄'), 'a handle-less R12 file gets an actionable message')
+})
+
 await check('the editor script ships with the package and runs standalone', () => {
   const script = join(PACKAGE_ROOT, 'lib', 'dxf_edit.py')
   assert.ok(existsSync(script), 'lib/dxf_edit.py ships')

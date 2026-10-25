@@ -587,7 +587,10 @@ export function apply(ctx, config = {}) {
   // The agent-facing half: a tool, so "把 165,105 那个孔改成 6.5" needs no shell
   // command from the model and no hand-built ezdxf script.
   ctx.effect(() => {
-    const tools = ctx.get('tools')
+    // `ctx.get` is how an optional service is read, but not every composition
+    // exposes it (a bare test context does not). Never let the tool entry take the
+    // preview routes down with it.
+    const tools = typeof ctx.get === 'function' ? ctx.get('tools') : undefined
     if (tools === undefined || tools === null || typeof tools.register !== 'function') {
       return () => {}
     }
