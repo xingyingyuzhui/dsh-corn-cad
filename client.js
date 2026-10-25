@@ -59,6 +59,8 @@ window.__ModuleLoader__.load({
         sent: '已发送（{count} 个图元），等待处理',
         sendFailed: '发送失败：{message}',
         noSession: '找不到当前会话，指令未发送；选中集已写入图纸旁的记录文件',
+        routeMissing: '预览服务没有响应（HTTP {status}）。宿主半边可能没加载：装完插件后需要重启 DeepSeek Harness。',
+        notJson: '预览服务返回了无法解析的内容，宿主半边可能版本不匹配。',
         recording: '正在写入选中集…',
       },
       en: {
@@ -87,6 +89,8 @@ window.__ModuleLoader__.load({
         sent: 'Sent ({count} entities), waiting for changes',
         sendFailed: 'Send failed: {message}',
         noSession: 'No conversation scope for this tab, so the instruction was not sent; the selection was still recorded beside the drawing',
+        routeMissing: 'The preview service did not answer (HTTP {status}). The host half is probably not loaded: restart DeepSeek Harness after installing.',
+        notJson: 'The preview service answered with something unreadable; the host half may be a different version.',
         recording: 'Recording the selection…',
       },
     }
@@ -431,8 +435,23 @@ window.__ModuleLoader__.load({
               body: data,
               signal: AbortSignal.timeout(180000),
             })
-            var payload = await response.json()
+            // A missing route answers with plain text ("not found"), and handing
+            // that to .json() raised a parser error that told the user nothing
+            // useful. Read the body as text and decide what it actually is.
+            var raw = await response.text()
             if (cancelled === true) return
+            var payload
+            try {
+              payload = JSON.parse(raw)
+            } catch (parseError) {
+              setView({
+                status: 'error',
+                message: response.ok
+                  ? t('notJson')
+                  : t('routeMissing', { status: response.status }),
+              })
+              return
+            }
             if (payload.ok !== true) {
               setView({ status: 'error', message: payload.message || t('failed') })
               return

@@ -671,7 +671,19 @@ async function mountBody(respond, options = {}) {
   const realFetch = globalThis.fetch
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url, init })
-    return respond(url, init)
+    const answer = await respond(url, init)
+    // A real Response is read as text first (the body may be a plain-text 404), so
+    // the double has to offer text() as well as json().
+    if (answer !== undefined && answer !== null && typeof answer.text !== 'function') {
+      const payload = await answer.json()
+      return {
+        ok: answer.ok,
+        status: answer.status,
+        text: async () => JSON.stringify(payload),
+        json: async () => payload,
+      }
+    }
+    return answer
   }
 
   const client = await loadClient({
@@ -1227,6 +1239,23 @@ async function callRoute(path, request) {
   try { raw = JSON.parse(text) } catch { raw = undefined }
   return { status: response.status, payload: raw, raw, text }
 }
+
+await check('the host half declares inject the way Cordis actually reads it', () => {
+  // Cordis reads `inject` as an array of service names. The object form
+  // ({ required, optional }) is not part of that contract: it leaves the fiber
+  // pending forever, so NOTHING mounts and every route 404s — a whole preview
+  // vanishing because of a declaration shape. This check exists because the fake
+  // ctx in the other tests cannot see that failure.
+  assert.ok(Array.isArray(host.inject), 'inject is a plain array')
+  for (const name of host.inject) {
+    assert.equal(typeof name, 'string', 'every inject entry is a service name')
+  }
+  assert.ok(host.inject.includes('connection'), 'the routes need the connection service')
+  // `tools` must NOT be injected: it is optional, reached through ctx.get, so a
+  // composition without a tool registry still mounts the preview.
+  assert.equal(host.inject.includes('tools'), false,
+    'tools is optional and must not be a hard inject')
+})
 
 await check('apply() registers the five documented routes, each owned by an effect', () => {
   const mounted = fakeHost()

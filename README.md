@@ -248,8 +248,8 @@ windows-1250~1258 / windows-874），R2007+ 一律 UTF-8。`\U+XXXX`、`%%P`、`
 
 ## 自检
 
-自检不需要网络、不需要 Harness、不需要 React、不需要安装任何依赖，纯 Node 跑完 39 项，
-全部通过时打印 `39/39 checks passed` 并以 0 退出，任何一项失败就以非 0 退出（可直接接 CI）。
+自检不需要网络、不需要 Harness、不需要 React、不需要安装任何依赖，纯 Node 跑完 40 项，
+全部通过时打印 `40/40 checks passed` 并以 0 退出，任何一项失败就以非 0 退出（可直接接 CI）。
 
 ```bash
 node test/selfcheck.mjs

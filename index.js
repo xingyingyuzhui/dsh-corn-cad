@@ -27,9 +27,12 @@ import { dxfToSvg } from './lib/dxf2svg.mjs'
 export const name = 'dsh-corn-cad'
 
 /** The connection service owns the /api channel these routes register on. */
-// `tools` is optional (a headless preset may not expose it); the preview routes
-// must mount regardless, so only the agent-facing tool entry depends on it.
-export const inject = { required: ['connection'], optional: ['tools'] }
+// Cordis `inject` is a plain array of service names; the object form with
+// `optional` is not part of this contract and silently prevented the whole
+// plugin from mounting. `tools` is reached through `ctx.get('tools')` inside an
+// effect instead, which is optional by construction: a composition without a tool
+// registry still mounts the preview routes.
+export const inject = ['connection']
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const require = createRequire(import.meta.url)
