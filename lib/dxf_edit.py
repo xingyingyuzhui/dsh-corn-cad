@@ -470,6 +470,43 @@ def find_by_geometry(doc, pick, tolerance=0.5):
     return best_entity
 
 
+# The AutoCAD colour index most people mean by a plain colour name. Users ask for
+# "black" or "red", not for index 7 or 250.
+COLOR_NAMES = {
+    "red": 1, "yellow": 2, "green": 3, "cyan": 4, "blue": 5, "magenta": 6,
+    "white": 7, "black": 7,  # 7 renders as black on light, white on dark paper
+    "gray": 8, "grey": 8, "lightgray": 9, "lightgrey": 9,
+    "orange": 30, "purple": 200, "brown": 32,
+}
+
+
+def color_index(value):
+    """Resolve a colour request to an AutoCAD index (int) or an RGB int (0xRRGGBB)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= 255 else None
+    text = str(value).strip().lower()
+    if text == "":
+        return None
+    if text.isdigit():
+        number = int(text)
+        return number if 0 <= number <= 255 else None
+    if text.startswith("#"):
+        digits = text[1:]
+        if len(digits) == 3:
+            digits = "".join(char * 2 for char in digits)
+        if len(digits) != 6:
+            return None
+        try:
+            return int(digits, 16)
+        except ValueError:
+            return None
+    if text in COLOR_NAMES:
+        return COLOR_NAMES[text]
+    return None
+
+
 def apply_edit(doc, edit):
     """Apply one edit. Returns a human-readable note, or raises ValueError."""
     handle = str(edit.get("handle") or "").strip()
@@ -533,11 +570,24 @@ def apply_edit(doc, edit):
 
     if op == "layer":
         entity.dxf.layer = str(edit["value"])
-        return f"{kind} {handle} layer -> {edit['value']}"
+        return f"{kind} ({how}) layer -> {edit['value']}"
 
     if op == "color":
-        entity.dxf.color = int(edit["value"])
-        return f"{kind} {handle} color -> {edit['value']}"
+        value = edit["value"]
+        target = color_index(value)
+        if target is None:
+            raise ValueError(f"unknown color {value!r}; give an AutoCAD color index (1-255) or a #RRGGBB value")
+        if isinstance(target, int):
+            entity.dxf.color = target
+            # A true colour left behind would win over the index, so clear it.
+            try:
+                if entity.dxf.hasattr("true_color"):
+                    del entity.dxf.true_color
+            except Exception:
+                pass
+            return f"{kind} ({how}) color -> AutoCAD index {target}"
+        entity.dxf.true_color = target
+        return f"{kind} ({how}) color -> #{target:06X}"
 
     if op == "move":
         dx = float(edit.get("dx", 0.0))
@@ -562,6 +612,36 @@ def apply_edit(doc, edit):
 def backup_path(path):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return f"{path}.{stamp}.bak"
+
+
+def ensure_table_handles(doc):
+    """Give table headers an identity so a handle-less drawing can be saved.
+
+    A DXF whose tables carry no handle is readable but not writable: ezdxf refuses
+    with "TABLE needs a handle, maybe loaded from DXF R12 without handle". The
+    entities themselves are fine — only the table *headers* lack the group code 5
+    the writer insists on. Assigning one is a structural repair with no effect on
+    geometry, so it is safe to do silently.
+
+    @returns {string[]} names of the tables that were repaired.
+    """
+    repaired = []
+    for name in ("layers", "linetypes", "styles", "views", "vports",
+                 "appids", "dimstyles", "ucs", "block_records"):
+        try:
+            table = getattr(doc, name)
+        except Exception:
+            continue
+        head = getattr(table, "head", None)
+        if head is None:
+            continue
+        try:
+            if not head.dxf.hasattr("handle"):
+                head.dxf.handle = doc.entitydb.next_handle()
+                repaired.append(name)
+        except Exception:
+            continue
+    return repaired
 
 
 def write_document(doc, path, page, version):
@@ -648,6 +728,7 @@ def main(argv=None):
     os.close(fd)
     backup = backup_path(path)
     try:
+        repaired_tables = ensure_table_handles(doc)
         write_document(doc, temp_path, page, version)
         shutil.copy2(path, backup)
         os.replace(temp_path, path)
@@ -658,9 +739,9 @@ def main(argv=None):
         # The most common write failure by far: a handle-less R12 file. ezdxf can
         # read such a file (after repair) but cannot assign identities on save, and
         # the bare ezdxf message does not tell the user what to do about it.
-        if "needs a handle" in message or "handle" in message.lower() and "R12" in message:
+        if "needs a handle" in message:
             message = (
-                "这份 DXF 是没有句柄的旧式 R12 结构，能读不能写。"
+                "这份 DXF 的表结构缺少句柄，自动补齐后仍无法保存。"
                 "请在 CAD 里另存为 R2000 或更新的版本（AutoCAD: 另存为 → AutoCAD 2000/LT2000 Drawing），再试一次。"
             )
         print(json.dumps({"ok": False, "code": "WRITE_FAILED", "message": message}, ensure_ascii=False))
@@ -672,6 +753,7 @@ def main(argv=None):
         "backup": backup,
         "notes": notes,
         "codepageBefore": page,
+        "repairedTables": repaired_tables,
         "entitiesNow": len(list(doc.modelspace())),
     }, ensure_ascii=False))
     return 0

@@ -1461,6 +1461,16 @@ await check('the editor fixes a lying code page so the renderer reads Chinese', 
   }
 })
 
+await check('a named colour resolves to the index AutoCAD uses', () => {
+  // "改成黑色" has to mean something to a DXF writer. Index 7 is the standard
+  // black-on-white value; a #RRGGBB request becomes a true colour instead.
+  const text = readFileSync(join(PACKAGE_ROOT, 'lib', 'dxf_edit.py'), 'utf8')
+  assert.ok(text.includes('"black": 7'), 'black maps to index 7')
+  assert.ok(text.includes('"red": 1'), 'red maps to index 1')
+  assert.ok(text.includes('def color_index'), 'one resolver handles name, index and hex')
+  assert.ok(text.includes('true_color'), 'a hex request becomes a true colour')
+})
+
 await check('an arc pick carries the arc bounds, not its full circle', () => {
   // A 30..210 arc of r=18 at (45,32.5) spans y 23.5..50.5. Reporting the whole
   // circle (14.5..50.5) made a band selection grab the arc from empty space and
@@ -1494,7 +1504,11 @@ await check('the editor repairs a drawing that omits subclass markers', () => {
   assert.ok(text.includes('def normalise_tags'), 'and can insert them before parsing')
   assert.ok(text.includes('def read_lenient'), 'with a lenient read behind the strict one')
   assert.ok(text.includes('_corncad_repaired'), 'repairing a file is reported, not hidden')
-  assert.ok(text.includes('没有句柄'), 'a handle-less R12 file gets an actionable message')
+  // A drawing whose tables lack group code 5 is now writable: the editor assigns
+  // the missing identity instead of refusing.
+  assert.ok(text.includes('def ensure_table_handles'), 'table headers get an identity so the file can be saved')
+  assert.ok(text.includes('repairedTables'), 'and the repair is reported')
+  assert.ok(text.includes('def color_index'), 'colours can be named, indexed or hex')
 })
 
 await check('the editor script ships with the package and runs standalone', () => {
