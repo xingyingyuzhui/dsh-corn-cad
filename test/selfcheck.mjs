@@ -1324,8 +1324,13 @@ await check('no leaked credential, no personal absolute path, and the author nam
   assert.match(LICENCE_TEXT, /^MIT License\n\nCopyright \(c\) 2026 /)
   assert.match(LICENCE_TEXT, /WITHOUT WARRANTY OF ANY KIND/)
   assert.match(LICENCE_TEXT, /Permission is hereby granted, free of charge/)
-  assert.ok(LICENCE_TEXT.includes(UPSTREAM_AUTHOR),
+  // The upstream MIT notice is a licence condition; it must survive somewhere that
+  // ships with every copy, whether that is LICENSE itself or the notice file.
+  const noticeText = readFileSync(join(PACKAGE_ROOT, 'THIRD-PARTY.md'), 'utf8')
+  assert.ok(LICENCE_TEXT.includes(UPSTREAM_AUTHOR) || noticeText.includes(UPSTREAM_AUTHOR),
     'the upstream MIT notice is kept: attribution is a licence condition, not a credit')
+  assert.ok(LICENCE_TEXT.includes('THIRD-PARTY.md'),
+    'and LICENSE points at where that notice lives')
 })
 
 await check('both READMEs exist, in both languages, with the same structure and the required chapters', () => {
