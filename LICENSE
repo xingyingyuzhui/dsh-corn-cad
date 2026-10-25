@@ -1,0 +1,36 @@
+MIT License
+
+Copyright (c) 2026 xingyingyuzhui (dsh-corn-cad: selection board, Chinese
+code-page decoding, theme, picking, instruction bubble, and all later changes)
+
+Portions derived from dsh-dwg-preview v1.0.0:
+Copyright (c) 2026 linanbuan
+https://github.com/linanbuan/dsh-dwg-preview
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Third-party components keep their own licences:
+
+- @mlightcad/libredwg-web (DWG decoding, vendored under vendor/) is GPL-3.0.
+  It is used only for .dwg files; .dxf preview needs no wasm. If you
+  redistribute a combined work, that combination is bound by GPL-3.0 — keep
+  vendor/ separate, or remove it and let users install the dependency from the
+  registry, to keep this package's own code under MIT alone.

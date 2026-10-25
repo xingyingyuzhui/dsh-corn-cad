@@ -1,0 +1,78 @@
+{
+  "name": "dsh-corn-cad",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "侧边栏 DXF/DWG 预览与画板：打开图纸即可查看，右键圈选图上任意区域，在弹出的气泡里写指令发给 agent —— agent 知道是哪张图的哪一部分。 A DSH sidebar DXF/DWG previewer with a right-drag selection board that sends the circled region to the agent.",
+  "icon": "./icon.svg",
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dxf",
+    "dwg",
+    "cad",
+    "drawing",
+    "document-preview",
+    "selection",
+    "libredwg",
+    "gbk"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xingyingyuzhui/dsh-corn-cad.git"
+  },
+  "homepage": "https://github.com/xingyingyuzhui/dsh-corn-cad#readme",
+  "bugs": {
+    "url": "https://github.com/xingyingyuzhui/dsh-corn-cad/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./icon.svg": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "lib/*.mjs",
+    "brand/*",
+    "icon.svg",
+    "docs/*.svg",
+    "test/*.mjs",
+    "test/sample.dxf",
+    "tools/*.mjs",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "CHANGES.md",
+    "vendor/**"
+  ],
+  "scripts": {
+    "test": "node test/selfcheck.mjs",
+    "example": "node tools/make-example.mjs",
+    "vendor:install": "node tools/install-vendor.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "dependencies": {
+    "@mlightcad/libredwg-web": "^0.7.14"
+  }
+}

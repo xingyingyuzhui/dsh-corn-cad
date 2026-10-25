@@ -1,0 +1,22 @@
+# DXF / DWG sidebar preview bundle patch.
+#
+# One insert over the profile entry list: the host half mounts there and registers
+# the /api/corn-cad routes; its dsh.client declaration pulls the browser half in.
+#
+# Theme is configurable here too (background/foreground must change together —
+# ACI 7 renders as `foreground`, so a dark background with a dark foreground
+# makes every line invisible):
+#
+#   - id: corn-cad
+#     config:
+#       background: "#000000"
+#       foreground: "#ffffff"
+#
+# Disable the plugin without uninstalling it:
+#
+#   - id: corn-cad
+#     disabled: true
+
+- insert:
+    - id: corn-cad
+      name: dsh-corn-cad

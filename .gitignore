@@ -1,0 +1,20 @@
+# Runtime droppings of a plugin that is mounted in place.
+node_modules/
+*.log
+.mount.log
+
+# Lock files: the harness profile installs this package's own dependencies, so a
+# lock file here would only pin whichever registry mirror happened to produce it.
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+npm-shrinkwrap.json
+
+# OS droppings.
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# CAD selection records: written next to a drawing at runtime, never part of the
+# plugin's own source.
+.corncad/
